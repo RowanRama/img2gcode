@@ -24,7 +24,7 @@ Image (PNG/JPG/…)
 Requires Python ≥ 3.9.
 
 ```bash
-git clone https://github.com/you/img2gcode
+git clone git@github.com:RowanRama/img2gcode.git
 cd img2gcode
 pip install -e .
 ```
@@ -121,22 +121,6 @@ python -m img2gcode -i logo.png -o out.gcode -c my_config.cfg
 | `line_width_mm` | 0 | Physical line width (mm). `0` = use `nozzle_diameter`. Typical values are 100–150 % of the nozzle diameter. |
 | `extrusion_multiplier` | 1.0 | Scales all extrusion values. Use to fine-tune over/under-extrusion. |
 | `layer_height` | 3 | Layer height used in extrusion volume calculations (should match `layers.layer_height`). |
-
----
-
-## GUI controls
-
-The visualiser opens automatically after GCode generation (use `--headless` to skip it, or `--visualise` to open it later).
-
-| Control | Action |
-|---|---|
-| Layer slider | Jump to any layer |
-| ◀ / ▶ buttons | Step one layer at a time |
-| Show travel | Toggle display of grey travel (non-printing) moves |
-| Show all layers | Show all layers below the current one, ghosted |
-| Stats panel (right) | Print move count, travel move count, total print length for the current layer |
-
-Lines are drawn at their physical width relative to the print area, so the visualiser gives an accurate impression of fill density.
 
 ---
 
