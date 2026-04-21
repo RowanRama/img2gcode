@@ -66,6 +66,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override the number of tools/colours (overrides config value).",
     )
     p.add_argument(
+        "--select-roi",
+        action="store_true",
+        help="Open an interactive window after segmentation to draw rectangular "
+             "regions that will be excluded from infill (perimeters are unaffected).",
+    )
+    p.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=True,
@@ -143,9 +149,18 @@ def main(argv=None):
             mask_px = int((label_map == i).sum())
             print(f"  Tool {i}: RGB≈{tuple(color)}  area={mask_px}px")
 
+    exclusion_zones = None
+    if args.select_roi:
+        from .roi_selector import select_exclusion_zones
+        if verbose:
+            print("[img2gcode] Opening ROI selector — draw rectangles to exclude from infill…")
+        exclusion_zones = select_exclusion_zones(label_map, cluster_colors)
+        if verbose:
+            print(f"[img2gcode] {len(exclusion_zones)} exclusion zone(s) selected.")
+
     if verbose:
         print("[img2gcode] Building toolpaths…")
-    layers = build_toolpaths(label_map, cfg)
+    layers = build_toolpaths(label_map, cfg, exclusion_zones=exclusion_zones)
 
     if verbose:
         total_moves = sum(len(tl.moves) for tl in layers)

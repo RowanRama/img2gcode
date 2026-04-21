@@ -311,13 +311,17 @@ def show_toolpath_debug(
 def build_toolpaths(
     label_map: np.ndarray,
     cfg: Config,
+    exclusion_zones: List[Tuple[int, int, int, int]] | None = None,
 ) -> List[ToolLayer]:
     """Build toolpath moves for all tools and all layers.
 
     Parameters
     ----------
-    label_map : (H, W) int array, -1 = background, 0…n-1 = tool
-    cfg       : loaded Config object
+    label_map       : (H, W) int array, -1 = background, 0…n-1 = tool
+    cfg             : loaded Config object
+    exclusion_zones : optional list of (x1, y1, x2, y2) pixel rectangles.
+                      Infill is suppressed inside these regions (perimeters
+                      are unaffected).
 
     Returns
     -------
@@ -399,6 +403,11 @@ def build_toolpaths(
                 cv2.MORPH_ELLIPSE, (2 * erode_px + 1, 2 * erode_px + 1)
             )
             fill_mask = cv2.erode(binary, kernel)
+
+            # Zero out any user-selected exclusion rectangles
+            if exclusion_zones:
+                for x1, y1, x2, y2 in exclusion_zones:
+                    fill_mask[y1:y2+1, x1:x2+1] = 0
 
             infill_lines = _zigzag_infill(
                 fill_mask, spacing_px, angle,
