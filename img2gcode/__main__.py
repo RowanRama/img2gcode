@@ -130,19 +130,27 @@ def main(argv=None):
     if args.n_tools is not None:
         cfg.tools.num_tools = args.n_tools
 
-    from .segmenter import segment
     from .toolpath import build_toolpaths
     from .writer import GCodeWriter
 
-    if verbose:
-        print(f"[img2gcode] Segmenting '{image_path}' into {cfg.tools.num_tools} tool(s)…")
-
-    label_map, cluster_colors, fg_mask = segment(
-        str(image_path),
-        n_tools=cfg.tools.num_tools,
-        white_threshold=cfg.image.white_threshold,
-        min_cluster_area=cfg.image.min_cluster_area,
-    )
+    is_svg = image_path.suffix.lower() == ".svg"
+    if is_svg:
+        from .svg_loader import load_svg
+        if verbose:
+            print(f"[img2gcode] Loading SVG '{image_path}' (one tool per fill colour)…")
+        label_map, cluster_colors, fg_mask = load_svg(str(image_path))
+        # SVG defines its own set of tools via distinct fill colours — override cfg
+        cfg.tools.num_tools = len(cluster_colors)
+    else:
+        from .segmenter import segment
+        if verbose:
+            print(f"[img2gcode] Segmenting '{image_path}' into {cfg.tools.num_tools} tool(s)…")
+        label_map, cluster_colors, fg_mask = segment(
+            str(image_path),
+            n_tools=cfg.tools.num_tools,
+            white_threshold=cfg.image.white_threshold,
+            min_cluster_area=cfg.image.min_cluster_area,
+        )
 
     if verbose:
         for i, color in enumerate(cluster_colors):

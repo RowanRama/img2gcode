@@ -1,6 +1,6 @@
 # img2gcode
 
-Convert any raster image (PNG, JPG, BMP, …) into multi-tool FDM GCode.  
+Convert any raster image (PNG, JPG, BMP, …) **or SVG** into multi-tool FDM GCode.  
 The pipeline segments the image by colour, traces perimeter contours, and fills each region with a configurable infill pattern — ready to print on a dual or multi-extruder machine.
 
 ---
@@ -8,14 +8,22 @@ The pipeline segments the image by colour, traces perimeter contours, and fills 
 ## How it works
 
 ```
-Image (PNG/JPG/…)
-  └─ Background removal     – pixels above a whiteness threshold are discarded
-  └─ K-Means segmentation   – foreground pixels are clustered into n tool colours
+Raster image (PNG/JPG/…)                    SVG file
+  └─ Background removal                       └─ Parse paths, group by fill colour
+  └─ K-Means (n clusters = n tools)           └─ Rasterise each colour to its own mask
+          └──────────────┬────────────────────────────┘
+                         ▼
+                   label_map (one label per tool)
+                         │
+                         ├─ optional: --select-roi  – draw rectangles to exclude from infill
+                         ▼
   └─ Perimeter tracing      – outer + inner (hole) contours extracted per region
   └─ Infill generation      – parallel or serpentine raster lines clipped to mask
   └─ GCode writer           – pixel → mm transform, extrusion calc, tool changes
   └─ Interactive visualiser – layer slider, travel toggle, per-layer stats
 ```
+
+**SVG input**: every distinct `fill` colour in the SVG becomes its own tool — K-Means is skipped, vector paths are sampled at high resolution and rasterised with an even-odd fill rule so compound shapes (letters with interior holes) are preserved. The `--n-tools` flag is ignored for SVG; the tool count comes from the file.
 
 ---
 
@@ -29,7 +37,7 @@ cd img2gcode
 pip install -e .
 ```
 
-Dependencies (`numpy`, `Pillow`, `scikit-learn`, `opencv-python-headless`, `matplotlib`) are installed automatically.
+Dependencies (`numpy`, `Pillow`, `scikit-learn`, `opencv-python-headless`, `matplotlib`, `svgelements`) are installed automatically.
 
 ---
 
@@ -38,6 +46,12 @@ Dependencies (`numpy`, `Pillow`, `scikit-learn`, `opencv-python-headless`, `matp
 ```bash
 # Convert an image and open the visualiser
 python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode
+
+# Convert an SVG (one tool per fill colour, no K-Means)
+python -m img2gcode -i logos/my_logo.svg -o output/my_logo.gcode
+
+# Interactive ROI — draw rectangles that should be left hollow (no infill)
+python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode --select-roi
 
 # Headless — generate GCode without opening the GUI
 python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode --headless

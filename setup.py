@@ -12,6 +12,7 @@ setup(
         "scikit-learn>=1.3",
         "opencv-python-headless>=4.8",
         "matplotlib>=3.7",
+        "svgelements>=1.9",
     ],
     entry_points={
         "console_scripts": [
