@@ -123,113 +123,146 @@ def _zigzag_infill(
     """
     H, W = binary_mask.shape
 
+    # Rotate into a canvas large enough to hold the whole mask after rotation —
+    # otherwise content near the corners is clipped by warpAffine and never
+    # gets scanned, leaving infill voids in the final output.
     center = (W / 2, H / 2)
     rot_mat = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
-    inv_rot = cv2.getRotationMatrix2D(center, -angle_deg, 1.0)
+    abs_cos = abs(rot_mat[0, 0])
+    abs_sin = abs(rot_mat[0, 1])
+    new_W = int(np.ceil(H * abs_sin + W * abs_cos))
+    new_H = int(np.ceil(H * abs_cos + W * abs_sin))
+    rot_mat[0, 2] += (new_W - W) / 2.0
+    rot_mat[1, 2] += (new_H - H) / 2.0
+    inv_rot = cv2.invertAffineTransform(rot_mat)
     rotated_mask = cv2.warpAffine(
-        binary_mask.astype(np.uint8), rot_mat, (W, H),
-        flags=cv2.INTER_NEAREST
+        binary_mask.astype(np.uint8), rot_mat, (new_W, new_H),
+        flags=cv2.INTER_NEAREST,
     )
 
     # --- Pass 1: collect every segment in scan order ----------------------
     # Direction only flips when a row actually has segments so that consecutive
     # filled rows always alternate sides — empty rows must not consume a flip.
-    raw_segs: List[List[Tuple[float, float]]] = []
+    # row_data accumulates (row_y, starts_array, ends_array) for rows with content.
+    seg_rows: List[int] = []      # rotated-y for each segment, in scan order
+    seg_starts_x: List[int] = []  # rotated-x at the "left" end of each segment
+    seg_ends_x: List[int] = []    # rotated-x at the "right" end of each segment
+    seg_dir: List[int] = []       # +1 = traverse L→R, -1 = R→L
+
     y = line_spacing_px / 2.0
     direction = 1
-    while y < H:
+    last_row_y = -1
+    while y < new_H:
         row_y = int(round(y))
-        if 0 <= row_y < H:
-            row = rotated_mask[row_y, :]
-            starts, ends = [], []
-            in_seg = False
-            for x in range(W):
-                if row[x] and not in_seg:
-                    starts.append(x)
-                    in_seg = True
-                elif not row[x] and in_seg:
-                    ends.append(x - 1)
-                    in_seg = False
-            if in_seg:
-                ends.append(W - 1)
+        # Skip rows already scanned (sub-pixel spacing collapses iterations)
+        if 0 <= row_y < new_H and row_y != last_row_y:
+            last_row_y = row_y
+            row = rotated_mask[row_y]
+            # Vectorised run-length scan: pad with 0, diff, locate ±1 transitions
+            padded = np.empty(row.size + 2, dtype=np.int8)
+            padded[0] = 0
+            padded[-1] = 0
+            padded[1:-1] = row
+            diffs = np.diff(padded)
+            row_starts = np.flatnonzero(diffs == 1)
+            row_ends = np.flatnonzero(diffs == -1) - 1
 
-            if starts:
-                row_segs: List[List[Tuple[float, float]]] = []
-                for s, e in zip(starts, ends):
-                    pts_rot = (
-                        [(float(s), float(row_y)), (float(e), float(row_y))]
-                        if direction == 1
-                        else [(float(e), float(row_y)), (float(s), float(row_y))]
-                    )
-                    pts_orig: List[Tuple[float, float]] = []
-                    for px, py in pts_rot:
-                        r = (inv_rot @ np.array([[px, py, 1.0]]).T).flatten()
-                        pts_orig.append((r[0], r[1]))
-                    if pts_orig:
-                        row_segs.append(pts_orig)
-
-                # For right-to-left rows, reverse segment order so the nearest
-                # endpoint (right side) is encountered first during chaining.
-                if direction == -1:
-                    row_segs.reverse()
-
-                raw_segs.extend(row_segs)
-                direction = -direction  # only flip on rows that had segments
-
+            if row_starts.size:
+                if direction == 1:
+                    order = range(row_starts.size)
+                else:
+                    # Right-to-left: emit segments right→left, swap start/end
+                    order = range(row_starts.size - 1, -1, -1)
+                for i in order:
+                    seg_rows.append(row_y)
+                    seg_starts_x.append(int(row_starts[i]))
+                    seg_ends_x.append(int(row_ends[i]))
+                    seg_dir.append(direction)
+                direction = -direction
         y += line_spacing_px
 
-    if not raw_segs:
+    n_segs = len(seg_rows)
+    if n_segs == 0:
         return []
+
+    # --- Vectorised inverse rotation -------------------------------------
+    # Build a (2*N, 3) homogeneous matrix of rotated-space endpoints, transform
+    # all in one matmul, then split back into start/end arrays in original space.
+    rot_pts = np.empty((2 * n_segs, 3), dtype=np.float64)
+    rot_pts[:, 2] = 1.0
+    s_x = np.asarray(seg_starts_x, dtype=np.float64)
+    e_x = np.asarray(seg_ends_x, dtype=np.float64)
+    rows_y = np.asarray(seg_rows, dtype=np.float64)
+    dirs = np.asarray(seg_dir, dtype=np.int8)
+    # Even rows = "from" point, odd rows = "to" point
+    # Direction encodes which physical end is "from": +1 → s_x first, -1 → e_x first
+    from_x = np.where(dirs == 1, s_x, e_x)
+    to_x = np.where(dirs == 1, e_x, s_x)
+    rot_pts[0::2, 0] = from_x
+    rot_pts[0::2, 1] = rows_y
+    rot_pts[1::2, 0] = to_x
+    rot_pts[1::2, 1] = rows_y
+    orig_pts = rot_pts @ inv_rot.T  # (2N, 2)
+
+    starts_arr = orig_pts[0::2]      # (N, 2): "from" endpoint per segment
+    ends_arr = orig_pts[1::2]        # (N, 2): "to" endpoint per segment
+    raw_segs: List[List[Tuple[float, float]]] = [
+        [(float(starts_arr[i, 0]), float(starts_arr[i, 1])),
+         (float(ends_arr[i, 0]),   float(ends_arr[i, 1]))]
+        for i in range(n_segs)
+    ]
 
     # Fast path: caller wants evenly-spaced parallel hatch — skip chaining.
     if not connect_lines:
         return raw_segs
 
     # --- Pass 2: greedy nearest-neighbour chaining -----------------------
-    # For each segment, pick the *closest* unvisited segment (either endpoint
-    # may match).  This walks one connected "column" of parallel infill lines
-    # completely before jumping to another column — far more robust than
-    # scanning in strict row order, which constantly switches columns when a
-    # row has multiple segments and fragments the serpentine.
+    # Walk one connected "column" of parallel infill lines completely before
+    # jumping to another column.  Uses a boolean ``visited`` mask so each step
+    # is a vectorised argmin over the unvisited subset rather than rebuilding
+    # numpy arrays / list-removing on every iteration.
     threshold = line_spacing_px * max_connect_factor
     polylines: List[List[Tuple[float, float]]] = []
-    unvisited = list(range(len(raw_segs)))
+    visited = np.zeros(n_segs, dtype=bool)
 
-    # Precompute endpoint arrays for fast distance queries
-    starts_arr = np.array([seg[0] for seg in raw_segs], dtype=float)
-    ends_arr = np.array([seg[-1] for seg in raw_segs], dtype=float)
+    visited[0] = True
+    chain: List[Tuple[float, float]] = list(raw_segs[0])
+    n_remaining = n_segs - 1
 
-    first = unvisited.pop(0)
-    chain = list(raw_segs[first])
-
-    while unvisited:
+    while n_remaining > 0:
         ex, ey = chain[-1]
-        remaining = np.array(unvisited)
-        d_start = np.hypot(starts_arr[remaining, 0] - ex, starts_arr[remaining, 1] - ey)
-        d_end = np.hypot(ends_arr[remaining, 0] - ex, ends_arr[remaining, 1] - ey)
+        unv_idx = np.flatnonzero(~visited)
+        d_start = np.hypot(starts_arr[unv_idx, 0] - ex, starts_arr[unv_idx, 1] - ey)
+        d_end = np.hypot(ends_arr[unv_idx, 0] - ex, ends_arr[unv_idx, 1] - ey)
 
-        best_start_pos = int(np.argmin(d_start))
-        best_end_pos = int(np.argmin(d_end))
-
-        if d_start[best_start_pos] <= d_end[best_end_pos]:
-            best_dist = float(d_start[best_start_pos])
-            best_seg_idx = int(remaining[best_start_pos])
+        bs = int(np.argmin(d_start))
+        be = int(np.argmin(d_end))
+        if d_start[bs] <= d_end[be]:
+            best_dist = float(d_start[bs])
+            best_seg_idx = int(unv_idx[bs])
             reverse_it = False
         else:
-            best_dist = float(d_end[best_end_pos])
-            best_seg_idx = int(remaining[best_end_pos])
+            best_dist = float(d_end[be])
+            best_seg_idx = int(unv_idx[be])
             reverse_it = True
 
         if best_dist > threshold:
-            # Nothing close — finalise current polyline, start new one
             polylines.append(chain)
-            next_idx = unvisited.pop(0)
+            next_idx = int(unv_idx[0])
+            visited[next_idx] = True
+            n_remaining -= 1
             chain = list(raw_segs[next_idx])
             continue
 
-        unvisited.remove(best_seg_idx)
+        visited[best_seg_idx] = True
+        n_remaining -= 1
         seg = raw_segs[best_seg_idx]
-        chain.extend(reversed(seg) if reverse_it else seg)
+        if reverse_it:
+            chain.append(seg[1])
+            chain.append(seg[0])
+        else:
+            chain.append(seg[0])
+            chain.append(seg[1])
 
     polylines.append(chain)
     return polylines
