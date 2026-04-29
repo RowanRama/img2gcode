@@ -24,6 +24,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import cv2
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -64,6 +66,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="Override the number of tools/colours (overrides config value).",
+    )
+    p.add_argument(
+        "--mode",
+        choices=("fill", "edge"),
+        default=None,
+        help="Generation mode: 'fill' (default — segment + perimeters + infill) "
+             "or 'edge' (Canny edge tracing for portraits / line drawings).",
+    )
+    p.add_argument(
+        "--debug-edges",
+        metavar="PATH",
+        default=None,
+        help="Edge mode only: save the pre-trace edge map (post CLAHE / "
+             "multi-scale Canny / fg-mask) as a PNG at PATH. Useful for "
+             "tuning detection params before running the full pipeline.",
     )
     p.add_argument(
         "--select-roi",
@@ -129,8 +146,11 @@ def main(argv=None):
     # CLI override for num_tools
     if args.n_tools is not None:
         cfg.tools.num_tools = args.n_tools
+    if args.mode is not None:
+        cfg.mode = args.mode
+    if args.debug_edges is not None:
+        cfg.edge.debug_edges_path = args.debug_edges
 
-    from .toolpath import build_toolpaths
     from .writer import GCodeWriter
 
     is_svg = image_path.suffix.lower() == ".svg"
@@ -158,7 +178,7 @@ def main(argv=None):
             print(f"  Tool {i}: RGB≈{tuple(color)}  area={mask_px}px")
 
     exclusion_zones = None
-    if args.select_roi:
+    if args.select_roi and cfg.mode == "fill":
         from .roi_selector import select_exclusion_zones
         if verbose:
             print("[img2gcode] Opening ROI selector — draw rectangles to exclude from infill…")
@@ -167,8 +187,18 @@ def main(argv=None):
             print(f"[img2gcode] {len(exclusion_zones)} exclusion zone(s) selected.")
 
     if verbose:
-        print("[img2gcode] Building toolpaths…")
-    layers = build_toolpaths(label_map, cfg, exclusion_zones=exclusion_zones)
+        print(f"[img2gcode] Building toolpaths in '{cfg.mode}' mode…")
+    if cfg.mode == "edge":
+        from .edge_pipeline import build_edge_toolpaths
+        from .segmenter import load_image
+        rgb = load_image(str(image_path))
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        layers = build_edge_toolpaths(
+            gray, fg_mask, cfg, tool_idx=cfg.edge.tool_idx,
+        )
+    else:
+        from .toolpath import build_toolpaths
+        layers = build_toolpaths(label_map, cfg, exclusion_zones=exclusion_zones)
 
     if verbose:
         total_moves = sum(len(tl.moves) for tl in layers)

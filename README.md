@@ -1,29 +1,13 @@
 # img2gcode
 
-Convert any raster image (PNG, JPG, BMP, …) **or SVG** into multi-tool FDM GCode.  
-The pipeline segments the image by colour, traces perimeter contours, and fills each region with a configurable infill pattern — ready to print on a dual or multi-extruder machine.
+Convert raster images, photos, and SVGs into multi-tool FDM GCode.
 
----
+Two generation modes:
 
-## How it works
+- **fill** — segments the image by colour (K-Means), traces perimeters, and fills each region with a configurable zigzag infill. One tool per colour cluster. Best for logos, flat-colour illustrations, and SVGs.
+- **edge** — Canny edge detection with CLAHE enhancement and multi-scale gradient stacking, then traces the resulting line drawing as continuous polylines. Best for portraits and photos where you want internal feature detail (eyes, jawline, hair) rather than solid-colour fills.
 
-```
-Raster image (PNG/JPG/…)                    SVG file
-  └─ Background removal                       └─ Parse paths, group by fill colour
-  └─ K-Means (n clusters = n tools)           └─ Rasterise each colour to its own mask
-          └──────────────┬────────────────────────────┘
-                         ▼
-                   label_map (one label per tool)
-                         │
-                         ├─ optional: --select-roi  – draw rectangles to exclude from infill
-                         ▼
-  └─ Perimeter tracing      – outer + inner (hole) contours extracted per region
-  └─ Infill generation      – parallel or serpentine raster lines clipped to mask
-  └─ GCode writer           – pixel → mm transform, extrusion calc, tool changes
-  └─ Interactive visualiser – layer slider, travel toggle, per-layer stats
-```
-
-**SVG input**: every distinct `fill` colour in the SVG becomes its own tool — K-Means is skipped, vector paths are sampled at high resolution and rasterised with an even-odd fill rule so compound shapes (letters with interior holes) are preserved. The `--n-tools` flag is ignored for SVG; the tool count comes from the file.
+SVGs go through a vector-aware path: every distinct `fill` colour becomes its own tool with no K-Means.
 
 ---
 
@@ -37,160 +21,85 @@ cd img2gcode
 pip install -e .
 ```
 
-Dependencies (`numpy`, `Pillow`, `scikit-learn`, `opencv-python-headless`, `matplotlib`, `svgelements`) are installed automatically.
-
 ---
 
-## Quick start
+## Usage
 
 ```bash
-# Convert an image and open the visualiser
-python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode
+# Default fill mode — opens the visualiser when done
+python -m img2gcode -i logo.png -o out.gcode
 
-# Convert an SVG (one tool per fill colour, no K-Means)
-python -m img2gcode -i logos/my_logo.svg -o output/my_logo.gcode
+# Edge mode for portraits / line drawings
+python -m img2gcode -i portrait.jpg -o out.gcode --mode edge --n-tools 1
 
-# Interactive ROI — draw rectangles that should be left hollow (no infill)
-python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode --select-roi
+# SVG input (one tool per fill colour)
+python -m img2gcode -i logo.svg -o out.gcode
 
-# Headless — generate GCode without opening the GUI
-python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode --headless
+# Headless (skip the GUI)
+python -m img2gcode -i logo.png -o out.gcode --headless
 
-# Use a custom config file
-python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode -c my_config.cfg
+# Custom config
+python -m img2gcode -i logo.png -o out.gcode -c my_config.cfg
 
-# Override number of colours/tools from the command line
-python -m img2gcode -i logos/my_logo.png -o output/my_logo.gcode --n-tools 3
+# Override the tool count
+python -m img2gcode -i logo.png -o out.gcode --n-tools 3
 
-# Open the visualiser for an already-generated GCode file
-python -m img2gcode --visualise output/my_logo.gcode
+# Fill mode — interactive ROI selection (draw rectangles to leave hollow)
+python -m img2gcode -i logo.png -o out.gcode --select-roi
+
+# Edge mode — save the pre-trace edge map for tuning
+python -m img2gcode -i portrait.jpg -o out.gcode --mode edge --debug-edges edges.png
+
+# Visualise an existing GCode file
+python -m img2gcode --visualise out.gcode
 ```
 
-If installed via `pip install .` the `img2gcode` command is available directly:
+If installed via `pip install .` the `img2gcode` command is available on `$PATH`.
 
-```bash
-img2gcode -i logos/my_logo.png -o output/my_logo.gcode
-```
+### CLI flags
+
+| Flag | Description |
+|---|---|
+| `-i, --input PATH` | Input image (PNG / JPG / BMP / SVG). Required unless `--visualise`. |
+| `-o, --output PATH` | Output GCode path. Required unless `--visualise`. |
+| `-c, --config PATH` | Override the default `.cfg` file. |
+| `--mode {fill,edge}` | Generation mode. Overrides `[mode] type` in the config. |
+| `--n-tools N` | Override the number of tools / colour clusters. Ignored for SVG. |
+| `--select-roi` | Fill mode only — open a window to draw rectangles excluded from infill. |
+| `--debug-edges PATH` | Edge mode only — save the pre-trace edge map as a PNG for tuning. |
+| `--headless` | Skip the GUI after generation. |
+| `--visualise PATH` | Open the GUI for an already-generated GCode file (no conversion). |
+| `-q, --quiet` | Suppress progress output. |
 
 ---
 
 ## Configuration
 
-All settings live in a single `.cfg` file (INI format).  Copy `configs/default.cfg` and pass it with `-c`:
+All settings live in a single `.cfg` file (INI format). Start by copying `configs/default.cfg`:
 
 ```bash
+cp configs/default.cfg my_config.cfg
 python -m img2gcode -i logo.png -o out.gcode -c my_config.cfg
 ```
 
-### `[machine]` — printer geometry and speeds
+Sections that matter most:
 
-| Key | Default | Description |
-|---|---|---|
-| `bed_size_x / bed_size_y` | 1200 | Print bed dimensions (mm) |
-| `print_width / print_height` | 1000 | Maximum size of the printed image (mm). The image is scaled to fit inside this box while keeping its aspect ratio. |
-| `origin_x / origin_y` | 10 | Offset of the print origin from the bed corner (mm) |
-| `travel_speed` | 7800 | Non-printing move speed (mm/min) |
-| `print_speed` | 1800 | Printing move speed (mm/min) |
-| `z_lift` | 1.0 | Z hop height on travel moves (mm) |
+- **`[mode]`** — `type = fill` or `edge`.
+- **`[machine]`** — bed dimensions, print area, travel/print speeds, Z lift.
+- **`[tools]`** — `num_tools`, custom tool-change GCode.
+- **`[image]`** — `white_threshold`, `min_cluster_area` (segmentation cleanup).
+- **`[layers]`** — `num_layers`, `layer_height`, `perimeter_loops`.
+- **`[infill]`** — fill mode pattern, `density`, `angle`, `connect_lines`.
+- **`[extrusion]`** — `filament_diameter`, `nozzle_diameter`, `line_width_mm`, `extrusion_multiplier`.
+- **`[edge]`** — edge mode: CLAHE strength, multi-scale Canny sigmas, parallel-edge collapse, polyline chaining, and stroke-separation tolerances. The default config has every field documented inline.
 
-### `[tools]` — multi-tool / multi-extruder
+### Tuning edge mode
 
-| Key | Default | Description |
-|---|---|---|
-| `num_tools` | 2 | Number of colour clusters. Each cluster maps to one extruder. Can be overridden with `--n-tools`. |
-| `tool_change_gcode` | `T{tool}\nG92 E0` | GCode snippet injected on every tool change. Use `{tool}` as a placeholder for the tool index (0-based). |
+Edge mode has a few interacting knobs. The intended workflow:
 
-### `[image]` — segmentation
-
-| Key | Default | Description |
-|---|---|---|
-| `white_threshold` | 220 | Pixels whose R, G, and B channels are all ≥ this value are treated as background and ignored. Lower this value to keep more near-white detail. |
-| `min_cluster_area` | 10 | Minimum pixel count for a cluster to be kept. Removes tiny speckles left after segmentation. |
-
-### `[layers]` — layer stack
-
-| Key | Default | Description |
-|---|---|---|
-| `num_layers` | 1 | How many identical layers to generate |
-| `layer_height` | 3 | Height of each layer (mm) |
-| `perimeter_loops` | 1 | Number of outer contour passes drawn around each colour region before infill |
-| `horizontal_shell_layers` | 3 | Reserved — solid top/bottom shells (not yet implemented) |
-
-### `[infill]` — fill pattern
-
-| Key | Default | Description |
-|---|---|---|
-| `pattern` | `zigzag` | Fill pattern. Only `zigzag` (parallel lines) is implemented. |
-| `density` | 100 | Infill density as a percentage (0–100). Controls line spacing: `spacing = nozzle_diameter / (density / 100)`. At 100 % lines are packed edge-to-edge; lower values leave larger gaps. |
-| `line_spacing` | 0 | Explicit line spacing override (mm). If non-zero this takes precedence over `density`. |
-| `angle` | 45 | Infill angle in degrees. Even layers use this angle, odd layers rotate by +90° so successive layers are perpendicular. |
-| `connect_lines` | `true` | `true` — adjacent scan lines are joined into a continuous serpentine (PrusaSlicer-style, fewer travel moves). `false` — each line is its own stroke with a travel between them, giving visually even parallel hatching. |
-
-### `[extrusion]` — extrusion maths
-
-| Key | Default | Description |
-|---|---|---|
-| `filament_diameter` | 1.75 | Filament diameter (mm) |
-| `nozzle_diameter` | 4 | Nozzle diameter (mm). Also used as the default line width. |
-| `line_width_mm` | 0 | Physical line width (mm). `0` = use `nozzle_diameter`. Typical values are 100–150 % of the nozzle diameter. |
-| `extrusion_multiplier` | 1.0 | Scales all extrusion values. Use to fine-tune over/under-extrusion. |
-| `layer_height` | 3 | Layer height used in extrusion volume calculations (should match `layers.layer_height`). |
-
----
-
-## Tips
-
-**Image preparation**  
-- Use images with a clean white background. If your logo has a drop shadow or near-white border, lower `white_threshold` (e.g. 200).
-- Higher contrast between colours gives better K-Means separation.
-
-**Choosing `num_tools`**  
-- Set `num_tools` to the number of distinct colours you want to print. For a two-colour logo use `2`; for a full multi-colour image increase as needed.
-- The K-Means algorithm always produces exactly `num_tools` clusters — if some colours are very similar they may merge.
-
-**Infill density vs. line spacing**  
-- At `density = 100` and `nozzle_diameter = 4` the line spacing is 4 mm (edge-to-edge packed).
-- At `density = 50` the spacing doubles to 8 mm.
-- Set `line_spacing` directly (e.g. `line_spacing = 6`) if you want a fixed gap regardless of nozzle size.
-
-**Serpentine vs. parallel hatching**  
-- `connect_lines = true` joins adjacent lines into one continuous path, minimising travel moves (PrusaSlicer-style). Short perpendicular connectors appear at the boundary edges.
-- `connect_lines = false` emits each line as an independent stroke, producing perfectly even parallel gaps with no edge connectors. Useful when verifying that density is correct.
-
----
-
-## Project layout
-
-```
-img2gcode/
-├── configs/
-│   └── default.cfg        # Default configuration (copy and customise)
-├── img2gcode/
-│   ├── config.py          # Config dataclasses + .cfg loader
-│   ├── segmenter.py       # Image loading, background removal, K-Means
-│   ├── toolpath.py        # Contour extraction + infill generation
-│   ├── writer.py          # GCode writer (pixel→mm, extrusion calc)
-│   ├── gcode_parser.py    # GCode → segment list for the visualiser
-│   ├── gui.py             # Interactive matplotlib visualiser
-│   ├── pipeline.py        # High-level pipeline helper
-│   └── __main__.py        # CLI entry point
-├── logos/                 # Example input images
-├── output/                # Generated GCode files (git-ignored)
-├── tests/
-├── requirements.txt
-└── setup.py
-```
-
----
-
-## Requirements
-
-- Python ≥ 3.9
-- numpy ≥ 1.24
-- Pillow ≥ 10.0
-- scikit-learn ≥ 1.3
-- opencv-python-headless ≥ 4.8
-- matplotlib ≥ 3.7
+1. Run with `--debug-edges edges.png` and check the edge map. If it's already wrong, tune **detection**: `clahe_clip`, `bilateral_d`, `detection_scales`, or pin `canny_low` / `canny_high`.
+2. If the edge map is right but the gcode looks fragmented, tune the **trace stage**: raise `collapse_factor` toward 1.0 to merge close parallel edges, raise `chain_gap_factor` to stitch broken polylines, or lower `min_separation_factor` to let nearby strokes coexist.
+3. Want chunkier strokes → raise `collapse_factor` to 1.5. Want maximum texture detail → put `0` in `detection_scales`
 
 ---
 

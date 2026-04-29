@@ -29,6 +29,9 @@ Thumbs.db
 # Windows alternate data streams (Zone.Identifier files)
 *:Zone.Identifier
 
+# Input files
+logos/
+
 # Output files (generated artefacts)
 output/
 *.gcode

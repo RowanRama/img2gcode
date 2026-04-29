@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import cv2
+
 from .config import Config
-from .segmenter import segment
+from .segmenter import load_image, segment
 from .toolpath import build_toolpaths
 from .writer import GCodeWriter
 
@@ -47,8 +49,14 @@ def run(
             print(f"  Tool {i}: RGB≈{tuple(color)}  area={mask_px}px")
 
     if verbose:
-        print(f"[img2gcode] Building toolpaths…")
-    layers = build_toolpaths(label_map, cfg)
+        print(f"[img2gcode] Building toolpaths in '{cfg.mode}' mode…")
+    if cfg.mode == "edge":
+        from .edge_pipeline import build_edge_toolpaths
+        rgb = load_image(image_path)
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        layers = build_edge_toolpaths(gray, fg_mask, cfg, tool_idx=cfg.edge.tool_idx)
+    else:
+        layers = build_toolpaths(label_map, cfg)
 
     if verbose:
         total_moves = sum(len(tl.moves) for tl in layers)

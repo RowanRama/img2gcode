@@ -30,6 +30,11 @@ _LAYER_Z_RE = re.compile(r"^;Z:([\d.]+)")
 _SCALE_RE = re.compile(r"; image size:.*?scale=([\d.]+)")
 _SIZE_RE = re.compile(r"; image size:.*?→\s*([\d.]+)x([\d.]+)mm")
 _LINEWIDTH_RE = re.compile(r"; line_width:([\d.]+)")
+_TIME_RE = re.compile(
+    r"; estimated_print_time: ([\d.]+) min\s+travel_time: ([\d.]+) min\s+total_time: ([\d.]+) min"
+)
+_DIST_RE = re.compile(r"; print_distance: ([\d.]+) mm\s+travel_distance: ([\d.]+) mm")
+_FILAMENT_RE = re.compile(r"; filament: ([\d.]+) mm\s+\(([\d.]+) g")
 
 
 def parse_gcode(path: str | Path) -> tuple[List[Dict], Dict]:
@@ -71,6 +76,22 @@ def parse_gcode(path: str | Path) -> tuple[List[Dict], Dict]:
         m = _LINEWIDTH_RE.match(line)
         if m:
             meta["line_width_mm"] = float(m.group(1))
+
+        m = _TIME_RE.match(line)
+        if m:
+            meta["print_time_min"] = float(m.group(1))
+            meta["travel_time_min"] = float(m.group(2))
+            meta["total_time_min"] = float(m.group(3))
+
+        m = _DIST_RE.match(line)
+        if m:
+            meta["print_distance_mm"] = float(m.group(1))
+            meta["travel_distance_mm"] = float(m.group(2))
+
+        m = _FILAMENT_RE.match(line)
+        if m:
+            meta["filament_mm"] = float(m.group(1))
+            meta["filament_g"] = float(m.group(2))
 
         # Layer annotation
         m = _LAYER_Z_RE.match(line)

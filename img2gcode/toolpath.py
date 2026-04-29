@@ -41,6 +41,78 @@ class ToolLayer:
 
 
 # ------------------------------------------------------------------ #
+# Travel-order optimisation                                             #
+# ------------------------------------------------------------------ #
+
+def order_polylines_greedy(
+    polys: List[List[Tuple[float, float]]],
+    start_xy: Tuple[float, float] | None = None,
+) -> List[List[Tuple[float, float]]]:
+    """Greedy nearest-neighbour ordering of polylines.
+
+    For each step, picks the unvisited polyline whose head OR tail is
+    closest to the current cursor position; the polyline is reversed if
+    its tail was the closer end so the cursor advances naturally. Used
+    to cut total travel distance — naive emission order can do double
+    or triple the necessary travel on busy edge / infill outputs.
+
+    Each input polyline is treated as an indivisible unit (we never
+    split them mid-stroke), so the print sequence is preserved.
+    """
+    if len(polys) < 2:
+        return [list(p) for p in polys]
+
+    pieces = [list(p) for p in polys]
+    n = len(pieces)
+    heads = np.empty((n, 2), dtype=np.float64)
+    tails = np.empty((n, 2), dtype=np.float64)
+    for i, p in enumerate(pieces):
+        heads[i] = p[0]
+        tails[i] = p[-1]
+
+    used = np.zeros(n, dtype=bool)
+    ordered: List[List[Tuple[float, float]]] = []
+
+    if start_xy is None:
+        # Seed with polyline 0 in its given orientation.
+        used[0] = True
+        ordered.append(pieces[0])
+        cursor = (float(pieces[0][-1][0]), float(pieces[0][-1][1]))
+    else:
+        cursor = (float(start_xy[0]), float(start_xy[1]))
+
+    while not used.all():
+        cand = np.flatnonzero(~used)
+        d_head = np.hypot(heads[cand, 0] - cursor[0], heads[cand, 1] - cursor[1])
+        d_tail = np.hypot(tails[cand, 0] - cursor[0], tails[cand, 1] - cursor[1])
+        bh = int(np.argmin(d_head))
+        bt = int(np.argmin(d_tail))
+        if d_head[bh] <= d_tail[bt]:
+            idx = int(cand[bh])
+            seg = pieces[idx]
+        else:
+            idx = int(cand[bt])
+            seg = list(reversed(pieces[idx]))
+        used[idx] = True
+        ordered.append(seg)
+        cursor = (float(seg[-1][0]), float(seg[-1][1]))
+
+    return ordered
+
+
+def _polyline_travel_total(polys: List[List[Tuple[float, float]]]) -> float:
+    """Sum of inter-polyline travel distances (start_i+1 - end_i)."""
+    if len(polys) < 2:
+        return 0.0
+    total = 0.0
+    prev_end = polys[0][-1]
+    for p in polys[1:]:
+        total += float(np.hypot(p[0][0] - prev_end[0], p[0][1] - prev_end[1]))
+        prev_end = p[-1]
+    return total
+
+
+# ------------------------------------------------------------------ #
 # Contour / perimeter extraction                                        #
 # ------------------------------------------------------------------ #
 
@@ -397,19 +469,38 @@ def build_toolpaths(
                 all_layers.append(tl)
                 continue
 
+            # Inset against neighbouring tools so adjacent perimeters don't
+            # overlap on the shared boundary. We dilate the *other* tools'
+            # mask by half the line width and subtract it from this tool's
+            # binary — this pulls the perimeter back only where it touches
+            # another tool, leaving boundaries against background untouched.
+            other_tools = ((label_map != tool_idx) & (label_map != -1)).astype(np.uint8)
+            if other_tools.sum() > 0:
+                inset_px = max(1, int(round(line_width_px / 2.0)))
+                inset_kernel = cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE, (2 * inset_px + 1, 2 * inset_px + 1)
+                )
+                encroach = cv2.dilate(other_tools, inset_kernel)
+                binary = (binary & ~encroach).astype(np.uint8)
+                if binary.sum() == 0:
+                    all_layers.append(tl)
+                    continue
+
             # --- Perimeter loops -------------------------------------------
+            # Collect each loop iteration as a list of polylines, order them
+            # with greedy nearest-neighbour, then emit. Closed loops are
+            # represented by appending the start vertex to the end so the
+            # ordering pass treats them as ordinary polylines.
             contours = _extract_contours(binary)
             offset_contours: List[List[np.ndarray]] = []
+            cursor = (tl.moves[-1].x, tl.moves[-1].y) if tl.moves else None
             for loop in range(perimeter_loops):
                 offset = loop * line_width_px
+                loop_polys: List[List[Tuple[float, float]]] = []
                 for c, is_hole in contours:
-                    # Holes offset outward (expanding into the hole) not inward
                     effective_offset = -offset if is_hole else offset
                     if loop == 0:
-                        loop_contour = c
-                        # Reverse hole winding so the nozzle traces it correctly
-                        if is_hole:
-                            loop_contour = c[::-1]
+                        loop_contour = c[::-1] if is_hole else c
                     else:
                         offset_result = _offset_contour(c, effective_offset)
                         if not offset_result:
@@ -418,16 +509,20 @@ def build_toolpaths(
                         loop_contour = offset_result[0]
                         if is_hole:
                             loop_contour = loop_contour[::-1]
-
                     if len(loop_contour) < 2:
                         continue
-                    # Travel to start
-                    tl.moves.append(Move(x=loop_contour[0][0], y=loop_contour[0][1], extrude=False))
-                    # Draw loop
-                    for pt in loop_contour[1:]:
+                    pts = [(float(p[0]), float(p[1])) for p in loop_contour]
+                    pts.append(pts[0])  # close the loop
+                    loop_polys.append(pts)
+
+                if not loop_polys:
+                    continue
+                ordered_loops = order_polylines_greedy(loop_polys, start_xy=cursor)
+                for poly in ordered_loops:
+                    tl.moves.append(Move(x=poly[0][0], y=poly[0][1], extrude=False))
+                    for pt in poly[1:]:
                         tl.moves.append(Move(x=pt[0], y=pt[1], extrude=True))
-                    # Close loop
-                    tl.moves.append(Move(x=loop_contour[0][0], y=loop_contour[0][1], extrude=True))
+                cursor = (ordered_loops[-1][-1][0], ordered_loops[-1][-1][1])
 
             # --- Infill ------------------------------------------------------
             # Erode mask by perimeter thickness before filling
@@ -446,13 +541,15 @@ def build_toolpaths(
                 fill_mask, spacing_px, angle,
                 connect_lines=cfg.infill.connect_lines,
             )
-            for poly in infill_lines:
-                if len(poly) < 2:
-                    continue
-                # Travel to start of line
-                tl.moves.append(Move(x=poly[0][0], y=poly[0][1], extrude=False))
-                for pt in poly[1:]:
-                    tl.moves.append(Move(x=pt[0], y=pt[1], extrude=True))
+            infill_lines = [
+                [(float(x), float(y)) for x, y in p] for p in infill_lines if len(p) >= 2
+            ]
+            if infill_lines:
+                ordered_infill = order_polylines_greedy(infill_lines, start_xy=cursor)
+                for poly in ordered_infill:
+                    tl.moves.append(Move(x=poly[0][0], y=poly[0][1], extrude=False))
+                    for pt in poly[1:]:
+                        tl.moves.append(Move(x=pt[0], y=pt[1], extrude=True))
 
             # show_toolpath_debug(
             #     binary, contours, offset_contours, fill_mask, infill_lines,

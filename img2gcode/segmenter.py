@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
+import cv2
 import numpy as np
 from PIL import Image
 from sklearn.cluster import KMeans
@@ -105,13 +106,37 @@ def segment(
     label_map = np.full((H, W), fill_value=-1, dtype=np.int32)
     label_map[fg_mask] = labels_flat
 
-    # Remove tiny speckle clusters below min_cluster_area
-    for t in range(n_clusters):
-        cluster_mask = label_map == t
-        area = int(cluster_mask.sum())
-        if area < min_cluster_area:
-            label_map[cluster_mask] = -1
+    # Per-tool connected-component speckle filter:
+    # the previous behaviour only checked total tool area, so anti-aliased pixels
+    # near a logo edge formed many tiny spurious blobs that all survived. Now we
+    # drop each connected component below min_cluster_area independently.
+    label_map = _remove_small_components(label_map, n_clusters, min_cluster_area)
 
     # show_debug(rgb, fg_mask, label_map, cluster_colors)
 
     return label_map, cluster_colors, fg_mask
+
+
+def _remove_small_components(
+    label_map: np.ndarray, n_clusters: int, min_area: int
+) -> np.ndarray:
+    """Drop connected components smaller than *min_area* px from each tool.
+
+    Cleared pixels become background (-1).  Operates per-tool so that tiny
+    speckles of one tool sitting next to a large region of another tool are
+    eliminated independently.
+    """
+    if min_area <= 0:
+        return label_map
+
+    out = label_map.copy()
+    for t in range(n_clusters):
+        mask = (label_map == t).astype(np.uint8)
+        if mask.sum() == 0:
+            continue
+        n_comp, comp_labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        # Component 0 is the background of the per-tool mask; skip it.
+        for cidx in range(1, n_comp):
+            if stats[cidx, cv2.CC_STAT_AREA] < min_area:
+                out[comp_labels == cidx] = -1
+    return out
