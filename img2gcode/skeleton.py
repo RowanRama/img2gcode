@@ -34,7 +34,7 @@ def skeleton_strokes(mask, mm_per_px: float, *, spur_mm: float, smooth_mm: float
     pos, edges, loops = _graph(skel)
     spur_px = spur_mm / mm_per_px
     edges = _prune_spurs(len(pos), edges, spur_px)
-    chains = _chains(pos, edges, max(3.0, spur_px), max_turn_deg) + loops
+    chains = _chains(edges, max(3.0, spur_px), max_turn_deg) + loops
     out = []
     for c in chains:
         p = (c + 0.5) * mm_per_px
@@ -147,8 +147,7 @@ def _direction(path: np.ndarray, side: int, look_px: float) -> np.ndarray:
     return v / norm if norm > 0 else v
 
 
-def _chains(pos: np.ndarray, edges: List[Edge], look_px: float,
-            max_turn_deg: float) -> List[np.ndarray]:
+def _chains(edges: List[Edge], look_px: float, max_turn_deg: float) -> List[np.ndarray]:
     """Join edges through nodes into chains (pixel xy); cycles come back closed."""
     incident: Dict[int, List[End]] = {}
     for i, (a, b, _) in enumerate(edges):
