@@ -66,3 +66,9 @@ def test_empty_toolpaths_still_valid(tmp_path):
     text = "\n".join(lines)
     assert stats.print_distance_mm == 0 and ";LAYER_CHANGE" in text and "M84 ; disable motors" in text
     assert not any(l.startswith("T0") for l in lines)
+
+
+def test_unknown_source_px_does_not_crash():
+    tp = Toolpaths(100.0, 50.0, 4.0, 1, [ToolPass(0, 0, [])], [(0, 0, 0)])  # source_px defaults to (0, 0)
+    lines, _ = gcode_lines(tp, Config())
+    assert lines[1] == "; image size: 0x0px → 100.0x50.0mm (scale=0.0000)"
