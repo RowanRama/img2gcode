@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Tuple, Union
 
 
 _G1_RE = re.compile(
@@ -37,8 +37,13 @@ _DIST_RE = re.compile(r"; print_distance: ([\d.]+) mm\s+travel_distance: ([\d.]+
 _FILAMENT_RE = re.compile(r"; filament: ([\d.]+) mm\s+\(([\d.]+) g")
 
 
-def parse_gcode(path: str | Path) -> tuple[List[Dict], Dict]:
-    """Parse a GCode file and return (segments, metadata).
+def parse_gcode(path: Union[str, Path]) -> Tuple[List[Dict], Dict]:
+    """Parse a GCode file and return (segments, metadata)."""
+    return parse_gcode_lines(Path(path).read_text(encoding="utf-8", errors="replace").splitlines())
+
+
+def parse_gcode_lines(lines: Iterable[str]) -> Tuple[List[Dict], Dict]:
+    """Parse G-code lines and return (segments, metadata).
 
     metadata keys: 'scale', 'print_width_mm', 'print_height_mm',
                    'line_width_mm', 'n_layers'
@@ -57,8 +62,6 @@ def parse_gcode(path: str | Path) -> tuple[List[Dict], Dict]:
     cur_tool = 0
     cur_layer = -1
     layer_z_map: Dict[float, int] = {}
-
-    lines = Path(path).read_text(errors="replace").splitlines()
 
     for raw_line in lines:
         line = raw_line.strip()

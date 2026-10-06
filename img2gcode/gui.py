@@ -237,8 +237,6 @@ def launch_gui(
         state["layer"] = int(slider.val)
         draw(state["layer"])
 
-    slider.on_changed(on_slider)
-
     # Checkboxes (right panel)
     ax_check = fig.add_axes([0.78, 0.60, 0.20, 0.15])
     ax_check.set_facecolor("#222")
@@ -349,10 +347,8 @@ def launch_gui(
         ax_info.set_title("Stats", color="white", fontsize=9, pad=4)
         fig.canvas.draw_idle()
 
-    original_on_slider = on_slider
-
     def on_slider_with_info(val):
-        original_on_slider(val)
+        on_slider(val)
         update_info(state["layer"])
 
     slider.on_changed(on_slider_with_info)

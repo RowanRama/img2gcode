@@ -2,20 +2,20 @@
 
 Usage
 -----
-# Convert image to GCode (opens GUI by default):
+# Image → toolpaths SVG + G-code (opens the viewer by default):
 python -m img2gcode -i logo.png -o output/logo.gcode
 
-# Headless (no GUI):
-python -m img2gcode -i logo.png -o output/logo.gcode --headless
+# Pick a drawing style, no viewer:
+python -m img2gcode -i photo.jpg -o output/photo.gcode --style contour --headless
 
-# Custom config:
-python -m img2gcode -i logo.png -o output/logo.gcode -c my_config.cfg
+# Only the toolpaths SVG (inspect in a browser, edit in Inkscape):
+python -m img2gcode -i logo.png -o output/logo.svg
 
-# Visualise an existing GCode file:
+# G-code from an edited toolpaths SVG:
+python -m img2gcode -i output/logo.svg -o output/logo.gcode
+
+# View an existing G-code file or toolpaths SVG:
 python -m img2gcode --visualise output/logo.gcode
-
-# Shorthand script (if installed via pip):
-img2gcode -i logo.png -o output/logo.gcode
 """
 
 from __future__ import annotations
@@ -24,194 +24,143 @@ import argparse
 import sys
 from pathlib import Path
 
-import cv2
+from .config import Config
+from .gcode_parser import parse_gcode, parse_gcode_lines
+from .pipeline import convert, make_artwork
+from .styles import ALIASES, STYLES, resolve_style
+from .svg_io import read_toolpaths_svg
+from .writer import gcode_lines
+
+_STYLE_CHOICES = list(STYLES) + list(ALIASES)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="img2gcode",
-        description="Convert raster images to multi-tool GCode toolpaths.",
+        description="Convert images and SVGs to a toolpaths SVG and multi-tool G-code.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument(
-        "-i", "--input",
-        metavar="IMAGE",
-        help="Input image path (PNG, JPG, BMP, …).",
-    )
-    p.add_argument(
-        "-o", "--output",
-        metavar="GCODE",
-        help="Output GCode file path.",
-    )
-    p.add_argument(
-        "-c", "--config",
-        metavar="CFG",
-        default=None,
-        help="Path to a .cfg config file (overrides defaults).",
-    )
-    p.add_argument(
-        "--headless",
-        action="store_true",
-        help="Skip the GUI visualiser after generation.",
-    )
-    p.add_argument(
-        "--visualise",
-        metavar="GCODE",
-        help="Open the GUI for an already-generated GCode file.",
-    )
-    p.add_argument(
-        "--n-tools",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Override the number of tools/colours (overrides config value).",
-    )
-    p.add_argument(
-        "--mode",
-        choices=("fill", "edge"),
-        default=None,
-        help="Generation mode: 'fill' (default — segment + perimeters + infill) "
-             "or 'edge' (Canny edge tracing for portraits / line drawings).",
-    )
-    p.add_argument(
-        "--debug-edges",
-        metavar="PATH",
-        default=None,
-        help="Edge mode only: save the pre-trace edge map (post CLAHE / "
-             "multi-scale Canny / fg-mask) as a PNG at PATH. Useful for "
-             "tuning detection params before running the full pipeline.",
-    )
-    p.add_argument(
-        "--select-roi",
-        action="store_true",
-        help="Open an interactive window after segmentation to draw rectangular "
-             "regions that will be excluded from infill (perimeters are unaffected).",
-    )
-    p.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        default=True,
-        help="Print progress messages (default: on).",
-    )
-    p.add_argument(
-        "-q", "--quiet",
-        action="store_true",
-        help="Suppress progress messages.",
-    )
+    p.add_argument("-i", "--input", metavar="INPUT",
+                   help="Image (PNG, JPG, …), artwork SVG or toolpaths SVG.")
+    p.add_argument("-o", "--output", metavar="OUTPUT",
+                   help="Output .gcode (plus a sibling .svg), or .svg for the toolpaths SVG only.")
+    p.add_argument("-c", "--config", metavar="CFG", default=None,
+                   help="Path to a .cfg config file (overrides defaults).")
+    p.add_argument("--style", choices=_STYLE_CHOICES, default=None,
+                   help="Drawing style (default: [mode] type in the config).")
+    p.add_argument("--mode", choices=_STYLE_CHOICES, default=None,
+                   help="Same as --style (kept for old scripts).")
+    p.add_argument("--n-tools", type=int, default=None, metavar="N",
+                   help="Number of tools/colours (overrides the config value).")
+    p.add_argument("--svg", metavar="PATH", default=None,
+                   help="Where to write the toolpaths SVG (default: next to the G-code).")
+    p.add_argument("--svg-only", action="store_true",
+                   help="Write the toolpaths SVG only, no G-code.")
+    p.add_argument("--select-roi", action="store_true",
+                   help="Draw rectangles to exclude from infill before planning (perimeters are unaffected).")
+    p.add_argument("--debug-edges", metavar="PATH", default=None,
+                   help="Edge style only: save the binary line map as a PNG at PATH.")
+    p.add_argument("--headless", action="store_true",
+                   help="Do not open the viewer after writing.")
+    p.add_argument("--visualise", metavar="FILE",
+                   help="Open the viewer for an existing .gcode file or toolpaths .svg.")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Kept for old scripts; messages are on unless -q.")
+    p.add_argument("-q", "--quiet", action="store_true",
+                   help="Suppress progress messages.")
     return p
+
+
+def load_segments(path, cfg: Config):
+    """Viewer segments and metadata for a .gcode file or a toolpaths .svg."""
+    path = Path(path)
+    if path.suffix.lower() == ".svg":
+        tp, _ = read_toolpaths_svg(path)
+        return parse_gcode_lines(gcode_lines(tp, cfg)[0])
+    return parse_gcode(path)
+
+
+def _report(res, cfg: Config) -> None:
+    if res.svg_path is not None:
+        print(f"[img2gcode] SVG written → {res.svg_path}")
+    if res.gcode_path is not None:
+        n = len(res.gcode_path.read_text(encoding="utf-8").splitlines())
+        print(f"[img2gcode] GCode written → {res.gcode_path}  ({n} lines)")
+    s = res.stats
+    grams = s.filament_grams(cfg.extrusion.filament_diameter)
+    print(
+        f"[img2gcode] Estimated: {s.total_time_min:.1f} min  "
+        f"({s.print_time_min:.1f} print + {s.travel_time_min:.1f} travel)  "
+        f"|  filament {s.filament_mm:.0f} mm ({grams:.2f} g PLA)  "
+        f"|  travel {s.travel_distance_mm:.0f} mm / "
+        f"print {s.print_distance_mm:.0f} mm"
+    )
+    if res.ignored_shapes:
+        print(f"[img2gcode] warning: {res.ignored_shapes} shape(s) outside tool layers were ignored")
+    lw = cfg.extrusion.effective_line_width
+    if abs(res.toolpaths.line_width_mm - lw) > 1e-3:
+        print(f"[img2gcode] warning: the SVG was planned for {res.toolpaths.line_width_mm:g} mm lines "
+              f"but the config's line width is {lw:g} mm")
 
 
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
+    verbose = not args.quiet
+    # Piped output on Windows is cp1252, which has no "→"; print "?" instead of crashing.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    cfg = Config.load(args.config)
 
-    verbose = args.verbose and not args.quiet
-
-    # ------------------------------------------------------------------ #
-    # Mode: visualise existing GCode                                        #
-    # ------------------------------------------------------------------ #
     if args.visualise:
-        gcode_path = Path(args.visualise)
-        if not gcode_path.exists():
-            print(f"[error] File not found: {gcode_path}", file=sys.stderr)
-            sys.exit(1)
-        from .gcode_parser import parse_gcode
+        path = Path(args.visualise)
+        if not path.exists():
+            sys.exit(f"[error] File not found: {path}")
         from .gui import launch_gui
-        if verbose:
-            print(f"[img2gcode] Parsing '{gcode_path}'…")
-        segments, meta = parse_gcode(gcode_path)
-        if verbose:
-            print(f"[img2gcode] {len(segments)} segments loaded.")
-        launch_gui(segments, meta=meta, title=f"img2gcode – {gcode_path.name}")
+        launch_gui(*load_segments(path, cfg), title=f"img2gcode – {path.name}")
         return
 
-    # ------------------------------------------------------------------ #
-    # Mode: convert image → GCode                                          #
-    # ------------------------------------------------------------------ #
     if not args.input:
         parser.error("--input/-i is required unless using --visualise.")
     if not args.output:
         parser.error("--output/-o is required unless using --visualise.")
+    input_path = Path(args.input)
+    if not input_path.exists():
+        sys.exit(f"[error] Input not found: {input_path}")
 
-    image_path = Path(args.input)
-    if not image_path.exists():
-        print(f"[error] Image not found: {image_path}", file=sys.stderr)
-        sys.exit(1)
-
-    from .config import Config
-
-    cfg = Config.load(args.config)
-
-    # CLI override for num_tools
+    if args.style or args.mode:
+        cfg.style = args.style or args.mode
+    try:
+        cfg.style = resolve_style(cfg.style)
+    except ValueError as e:
+        sys.exit(f"[error] {e} (check [mode] type in the config)")
     if args.n_tools is not None:
         cfg.tools.num_tools = args.n_tools
-    if args.mode is not None:
-        cfg.mode = args.mode
     if args.debug_edges is not None:
         cfg.edge.debug_edges_path = args.debug_edges
+    n_tools_explicit = args.n_tools is not None
 
-    from .writer import GCodeWriter
+    art, zones = None, None
+    if args.select_roi:
+        art = make_artwork(input_path, cfg, n_tools_explicit)
+        if art is not None and art.regions:
+            from .roi_selector import select_exclusion_zones
+            zones = select_exclusion_zones(art)
+            if verbose:
+                print(f"[img2gcode] {len(zones)} exclusion zone(s) selected.")
+        else:
+            print("[img2gcode] --select-roi needs an artwork with filled regions; skipping it")
 
-    is_svg = image_path.suffix.lower() == ".svg"
-    if is_svg:
-        from .svg_loader import load_svg
-        if verbose:
-            print(f"[img2gcode] Loading SVG '{image_path}' (one tool per fill colour)…")
-        label_map, cluster_colors, fg_mask = load_svg(str(image_path))
-        # SVG defines its own set of tools via distinct fill colours — override cfg
-        cfg.tools.num_tools = len(cluster_colors)
-    else:
-        from .segmenter import segment
-        if verbose:
-            print(f"[img2gcode] Segmenting '{image_path}' into {cfg.tools.num_tools} tool(s)…")
-        label_map, cluster_colors, fg_mask = segment(
-            str(image_path),
-            n_tools=cfg.tools.num_tools,
-            white_threshold=cfg.image.white_threshold,
-            min_cluster_area=cfg.image.min_cluster_area,
-        )
-
+    res = convert(input_path, args.output, cfg, svg_path=args.svg, svg_only=args.svg_only,
+                  exclusion_zones=zones, n_tools_explicit=n_tools_explicit, artwork=art)
     if verbose:
-        for i, color in enumerate(cluster_colors):
-            mask_px = int((label_map == i).sum())
-            print(f"  Tool {i}: RGB≈{tuple(color)}  area={mask_px}px")
-
-    exclusion_zones = None
-    if args.select_roi and cfg.mode == "fill":
-        from .roi_selector import select_exclusion_zones
-        if verbose:
-            print("[img2gcode] Opening ROI selector — draw rectangles to exclude from infill…")
-        exclusion_zones = select_exclusion_zones(label_map, cluster_colors)
-        if verbose:
-            print(f"[img2gcode] {len(exclusion_zones)} exclusion zone(s) selected.")
-
-    if verbose:
-        print(f"[img2gcode] Building toolpaths in '{cfg.mode}' mode…")
-    if cfg.mode == "edge":
-        from .edge_pipeline import build_edge_toolpaths
-        from .segmenter import load_image
-        rgb = load_image(str(image_path))
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        layers = build_edge_toolpaths(
-            gray, fg_mask, cfg, tool_idx=cfg.edge.tool_idx,
-        )
-    else:
-        from .toolpath import build_toolpaths
-        layers = build_toolpaths(label_map, cfg, exclusion_zones=exclusion_zones)
-
-    if verbose:
-        total_moves = sum(len(tl.moves) for tl in layers)
-        print(f"[img2gcode] Generated {total_moves} moves across {len(layers)} tool-layers.")
-
-    writer = GCodeWriter(cfg, label_map.shape)
-    writer.write(layers, args.output)
+        _report(res, cfg)
 
     if not args.headless:
-        from .gcode_parser import parse_gcode
         from .gui import launch_gui
-        segments, meta = parse_gcode(args.output)
-        launch_gui(segments, meta=meta, title=f"img2gcode – {image_path.name}")
+        target = res.gcode_path or res.svg_path or input_path
+        launch_gui(*load_segments(target, cfg), title=f"img2gcode – {input_path.name}")
 
 
 if __name__ == "__main__":
