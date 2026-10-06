@@ -290,7 +290,9 @@ img2gcode --visualise FILE.gcode|FILE.svg
 
 ## Config
 
-Sections `[machine] [tools] [image] [layers] [infill] [extrusion]` keep every key and meaning. `[mode] type` takes
+Sections `[machine] [tools] [image] [layers] [infill] [extrusion]` keep every key and meaning, except three keys
+nothing used (`tool_change_gcode`, `horizontal_shell_layers`) or that `[fill] min_feature_factor` replaces (`min_cluster_area`);
+they are dropped and ignored if present. `[mode] type` takes
 any style name. New sections `[fill] [edge] [contour] [oneline] [squiggle] [hatch]` with the keys listed above.
 Old `[edge]` keys (`clahe_clip`, `detection_scales`, `collapse_factor`, …) are ignored without error.
 
