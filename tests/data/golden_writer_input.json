@@ -1,0 +1,25 @@
+{
+  "image_hw": [160, 200],
+  "cfg": {
+    "machine": {"print_width": 250.0, "print_height": 200.0, "travel_speed": 7800.0, "print_speed": 1800.0, "z_lift": 1.0},
+    "tools": {"num_tools": 2},
+    "layers": {"num_layers": 2, "layer_height": 3.0, "perimeter_loops": 1},
+    "infill": {"pattern": "zigzag", "density": 100.0, "line_spacing": 0.0, "angle": -45.0},
+    "extrusion": {"filament_diameter": 1.75, "nozzle_diameter": 4.0, "line_width_mm": 0.0, "extrusion_multiplier": 1.0, "layer_height": 3.0}
+  },
+  "tool_layers": [
+    {"tool": 0, "layer": 0, "polys": [
+      [[10, 10], [60, 10], [60, 50], [10, 50], [10, 10]],
+      [[20.5, 20], [40, 20.5], [40, 30], [22, 31.5]]
+    ]},
+    {"tool": 1, "layer": 0, "polys": [
+      [[120, 80], [180, 80], [180, 150], [120, 150], [120, 80]],
+      [[125, 85], [175, 85]],
+      [[175, 89], [125, 89]]
+    ]},
+    {"tool": 0, "layer": 1, "polys": [
+      [[10, 10], [60, 10], [60, 50], [10, 50], [10, 10]]
+    ]},
+    {"tool": 1, "layer": 1, "polys": []}
+  ]
+}
