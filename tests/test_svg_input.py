@@ -118,6 +118,47 @@ def test_group_transform_applied(cfg, tmp_path):
     assert a.regions[0].shape.bounds[0] == pytest.approx(350, abs=0.5)
 
 
+def test_rotated_primitives_keep_their_transform(cfg, tmp_path):
+    body = ('<rect x="40" y="40" width="20" height="10" transform="rotate(45 50 45)"/>'
+            '<ellipse cx="50" cy="80" rx="20" ry="5" transform="rotate(90 50 80)" fill="#ff0000"/>')
+    a = load_svg_artwork(svg(tmp_path, body), cfg)
+    rect = [r.shape for r in a.regions if a.palette[r.tool] == (0, 0, 0)][0]
+    ell = [r.shape for r in a.regions if a.palette[r.tool] == (255, 0, 0)][0]
+    assert rect.bounds == pytest.approx(tuple(v * S for v in (39.393, 34.393, 60.607, 55.607)), abs=0.1)
+    assert rect.area == pytest.approx(200 * S * S, rel=0.01)
+    assert ell.bounds == pytest.approx(tuple(v * S for v in (45, 60, 55, 100)), abs=0.5)
+
+
+def test_mirrored_primitive_keeps_its_transform(cfg, tmp_path):
+    body = '<g transform="translate(100,0) scale(-1,1)"><rect x="10" y="10" width="20" height="10"/></g>'
+    a = load_svg_artwork(svg(tmp_path, body), cfg)
+    assert a.regions[0].shape.bounds == pytest.approx(tuple(v * S for v in (70, 10, 90, 20)), abs=0.1)
+    assert a.regions[0].shape.area == pytest.approx(200 * S * S, rel=0.01)
+
+
+def test_rotated_stroke_with_document_scale(cfg, tmp_path):
+    # width 200 on a 100-unit viewBox: 2 document units per user unit, still 7 mm per user unit on the page.
+    body = ('<rect x="40" y="40" width="20" height="10" transform="rotate(45 50 45)" '
+            'fill="none" stroke="#000" stroke-width="4"/>')
+    a = load_svg_artwork(svg(tmp_path, body, extra='width="200" height="200"'), cfg)
+    half = (24 + 14) / 2 * np.sqrt(0.5)                  # outer edge 24 x 14, rotated 45 degrees
+    assert a.regions[0].shape.bounds == pytest.approx(
+        tuple(v * S for v in (50 - half, 45 - half, 50 + half, 45 + half)), abs=0.1)
+    assert a.regions[0].shape.area == pytest.approx((24 * 14 - 16 * 6) * S * S, rel=0.01)
+
+
+@pytest.mark.parametrize("attrs", [
+    'fill="#ff0000" display="none"', 'fill="#ff0000" visibility="hidden"', 'fill="#ff0000" opacity="0"',
+    'fill="#ff0000" fill-opacity="0"', 'fill="url(#g)" fill-opacity="0"',
+    'fill="none" stroke="url(#g)" stroke-width="4" stroke-opacity="0"',
+])
+def test_invisible_paint_is_skipped(cfg, tmp_path, attrs):
+    body = ('<defs><linearGradient id="g"><stop offset="0" stop-color="#ff0000"/></linearGradient></defs>'
+            f'<rect width="40" height="40"/><rect x="50" width="40" height="40" {attrs}/>')
+    a = load_svg_artwork(svg(tmp_path, body), cfg)
+    assert a.palette == [(0, 0, 0)] and area(a, 0) == pytest.approx((40 * S) ** 2, rel=0.01)
+
+
 def test_no_shapes_raises(cfg, tmp_path):
     with pytest.raises(ValueError):
         load_svg_artwork(svg(tmp_path, ""), cfg)

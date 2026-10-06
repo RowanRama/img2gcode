@@ -50,7 +50,7 @@ def load_svg_artwork(path, cfg, n_tools: Optional[int] = None) -> Artwork:
             rule = str(elem.values.get("fill-rule", "nonzero")).strip()
             _cover(paint, rings_to_geometry(subs, rule), fill)
         stroke = _paint(elem, "stroke", gradients)
-        stroke_width = (elem.stroke_width or 0.0) * k
+        stroke_width = (elem.implicit_stroke_width or 0.0) * k    # through any transform reify left
         if stroke is not None and stroke_width > 0:
             if stroke_width >= 1.5 * lw:
                 _cover(paint, _stroke_outline(subs, stroke_width, elem.values), stroke)
@@ -104,6 +104,8 @@ def _number(value, default: float) -> float:
 
 def _paint(elem, attr: str, gradients: Dict[str, RGB]) -> Optional[RGB]:
     """RGB of the shape's fill or stroke, or None when it paints nothing."""
+    if _number(elem.values.get(f"{attr}-opacity"), 1.0) <= 0:
+        return None
     url = _URL.search(str(elem.values.get(attr, "")))
     if url:
         return gradients.get(url.group(1), GREY)
@@ -147,7 +149,9 @@ def _stop_colour(stop) -> Optional[RGB]:
 def _subpaths(elem, k: float) -> List[np.ndarray]:
     """Each subpath in page mm: line ends exact, curves sampled at most STEP_MM apart."""
     out = []
-    for sub in Path(elem).as_subpaths():
+    path = Path(elem)
+    path.reify()            # rotated, skewed or mirrored rects/ellipses keep their transform after parsing
+    for sub in path.as_subpaths():
         pts = []
         for seg in sub:
             if isinstance(seg, (Move, Line, Close)):
