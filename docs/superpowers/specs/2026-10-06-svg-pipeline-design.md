@@ -90,7 +90,8 @@ class Toolpaths:
 | `config.py` | Dataclass per section; one generic loader that reads every field by its annotated type, falls back to the dataclass default, ignores unknown keys. Dataclass defaults are the single source of truth; `configs/default.cfg` documents them with the user's machine values. |
 | `model.py` | Types above. |
 | `geometry.py` | Pure numpy/shapely: polyline length, resample, smooth (moving average over arc length, endpoints and closure kept), Douglas-Peucker simplify, `rings_to_geometry(rings, rule)` (nonzero/evenodd via face winding), `hatch_lines(geom, spacing, angle, connect)`, `order_strokes(strokes, start)`, `chain_strokes`, `deoverlap(strokes, …)`. |
-| `raster.py` | Image I/O and pixel work: `load_rgb`, `fit_page`, `working_image`, `estimate_noise` (Immerkær), `denoise`, `foreground_mask`, `palette_kmeans`, `mask_to_geometry`, `tone_levels`, `skeleton_strokes`. |
+| `raster.py` | Image I/O and pixel work: `load_rgb`, `fit_page`, `working_image`, `estimate_noise` (Immerkær), `denoise`, `foreground_mask`, `palette_kmeans`, `mask_to_geometry`, `tone_levels`, `sample_colors`. |
+| `skeleton.py` | `skeleton_strokes(mask, mm_per_px, …)`: skeletonize a binary mask and trace it into smooth strokes (graph walk, spur pruning, straight-through joining at junctions). |
 | `styles/` | `fill`, `edge`, `contour`, `oneline`, `squiggle`, `hatch`. Each exposes `make(rgb, cfg) -> Artwork`. `styles/__init__.py` holds the `STYLES` registry and `ALIASES = {"lines": "edge"}`. |
 | `svg_input.py` | Any non-toolpath SVG → `Artwork`. |
 | `planner.py` | `Artwork` → `Toolpaths`: perimeters, thin-feature centrelines, infill, ordering, layers. |
@@ -171,7 +172,7 @@ Fix: write the file as UTF-8 (`write_text(..., encoding="utf-8")`); keep platfor
   centreline, round caps/joins); otherwise a centreline `Stroke` of kind `line`. A shape with both gets both.
 - Gradient fills use the mean of their stop colours; unresolvable paints fall back to mid-grey.
 - Colours with all channels ≥ `image.white_threshold` are paper: they occlude but do not print.
-- Tools: one per distinct remaining colour (today's behaviour). If `--n-tools` was given explicitly, merge colours
+- Tools: one per distinct remaining colour (today's behaviour); colours closer than ΔE 5 in Lab count as one. If `--n-tools` was given explicitly, merge colours
   down to that many with area-weighted k-means in Lab. Palette sorted dark → light.
 - `underlay`: none (no raster available).
 
@@ -302,12 +303,12 @@ Old `[edge]` keys (`clahe_clip`, `detection_scales`, `collapse_factor`, …) are
   hidden layer, stray shape outside tool groups, travel/source layers ignored).
 - `tests/test_svg_input.py`: hole by nonzero winding and by evenodd, occlusion order, white is paper, thick
   stroke → region, thin stroke → line, gradient fallback, `--n-tools` merging.
-- `tests/test_geometry.py`, `tests/test_raster.py`: units, including `skeleton_strokes` on `+`, `T`, ring and a
+- `tests/test_geometry.py`, `tests/test_raster.py`, `tests/test_skeleton.py`: units, including `skeleton_strokes` on `+`, `T`, ring and a
   spur, and `rings_to_geometry` winding rules.
 - `tests/test_planner.py`: first perimeter is lw/2 inside the region, abutting tools' beads don't overlap, infill
   stays inside `inner`, exclusion zones, thin feature → centreline, layer angle alternation, every stroke emitted
   once.
-- `tests/test_styles.py`: every style on synthetic images returns non-empty in-bounds artwork with valid tools.
+- `tests/test_style_<name>.py` (one file per style): every style on synthetic images returns non-empty in-bounds artwork with valid tools.
   Noise test for `edge`: circle + rectangle at σ = 45 noise; ≥ 85 % of the true outline within 1.5·lw of a stroke
   (recall) and ≥ 85 % of stroke length within 1.5·lw of the true outline (precision). `fill` on the same image:
   ≤ 4 regions per tool, region area within 10 % of truth. `oneline`: exactly one stroke per used tool. `squiggle`:
