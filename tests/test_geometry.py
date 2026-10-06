@@ -123,3 +123,13 @@ def test_deoverlap():
     assert len(out) == 5                              # a, far, and three pieces of cross
     assert lens[-1] == pytest.approx(80, abs=1) and lens[-2] == pytest.approx(80, abs=1)
     assert all(LineString(p).distance(LineString(a)) >= 3.5 or polyline_length(p) > 70 for p in out)
+
+
+@pytest.mark.parametrize("offset", [0.0, 0.25, 0.5, 0.75])  # sub-cell positions (cell = min_sep / 4 = 1 mm)
+def test_deoverlap_cuts_at_min_sep(offset):
+    y = 50.0 + offset
+    a = np.array([[10, y], [90, y]], float)
+    for f, kept in ((0.8, False), (1.3, True)):
+        b = a + [0, f * 4.0]
+        out = deoverlap([a, b], 100, 100, min_sep=4.0, min_length=2.0)
+        assert (sum(polyline_length(p) for p in out[1:]) > 79) == kept, f

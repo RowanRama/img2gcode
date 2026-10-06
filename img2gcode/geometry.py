@@ -299,7 +299,9 @@ def deoverlap(polys: Sequence[np.ndarray], width_mm: float, height_mm: float,
     W = int(np.ceil(width_mm / px)) + 2
     H = int(np.ceil(height_mm / px)) + 2
     mask = np.zeros((H, W), np.uint8)
-    radius = max(1, int(round(min_sep / px)))
+    # min_sep is 4 cells. cv2 grows an odd-thickness line by half a pixel and fills its edge
+    # pixels, so a 7 px brush blocks about 4 cells either side; 9 px blocked about 1.3-1.6x min_sep.
+    brush = 7
     out: List[np.ndarray] = []
     for p in polys:
         p = _arr(p)
@@ -320,6 +322,6 @@ def deoverlap(polys: Sequence[np.ndarray], width_mm: float, height_mm: float,
         kept = [simplify(r, px / 4.0) for r in runs if len(r) >= 2 and polyline_length(r) >= min_length]
         for seg in kept:                         # cell (i, j) is centred on pixel (i, j) for cv2
             pts = np.round((seg / px - 0.5) * 16).astype(np.int32).reshape(-1, 1, 2)
-            cv2.polylines(mask, [pts], False, 1, thickness=2 * radius + 1, shift=4)
+            cv2.polylines(mask, [pts], False, 1, thickness=brush, shift=4)
         out.extend(kept)
     return out
