@@ -52,11 +52,15 @@ def test_toolpaths_svg_reconverts_identically(cfg, tmp_path):
 
 def test_artwork_svg_input(cfg, tmp_path):
     p = tmp_path / "art.svg"
-    p.write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
-                 '<rect width="40" height="40" fill="#ff0000"/><rect x="50" width="40" height="40" fill="#0000ff"/></svg>',
-                 encoding="utf-8")
+    original = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+                '<rect width="40" height="40" fill="#ff0000"/><rect x="50" width="40" height="40" fill="#0000ff"/></svg>')
+    p.write_text(original, encoding="utf-8")
     res = convert(p, tmp_path / "art.gcode", cfg)
     assert "; tools: 2  layers: 1" in res.gcode_path.read_text(encoding="utf-8")
+    assert p.read_text(encoding="utf-8") == original           # the artwork is never overwritten
+    assert res.svg_path == tmp_path / "art.toolpaths.svg" and is_toolpaths_svg(res.svg_path)
+    res = convert(p, tmp_path / "art.svg", cfg)                # SVG-only output onto the input
+    assert p.read_text(encoding="utf-8") == original and res.svg_path == tmp_path / "art.toolpaths.svg"
 
 
 @pytest.mark.parametrize("style", STYLES)

@@ -52,7 +52,8 @@ def convert(input_path, output_path, cfg: Config, *, svg_path=None, svg_only: bo
     """Write the toolpaths SVG, then the G-code made from it.
 
     An *output_path* ending in .svg (or *svg_only*) writes only the SVG. Otherwise
-    the SVG goes to *svg_path*, or next to the G-code with the same stem.
+    the SVG goes to *svg_path*, or next to the G-code with the same stem. If that
+    path is the input artwork SVG itself, it becomes <stem>.toolpaths.svg instead.
     """
     input_path, output_path = Path(input_path), Path(output_path)
     if output_path.suffix.lower() == ".svg":
@@ -70,6 +71,8 @@ def convert(input_path, output_path, cfg: Config, *, svg_path=None, svg_only: bo
             written_svg = svg_out
     else:
         art = artwork if artwork is not None else make_artwork(input_path, cfg, n_tools_explicit)
+        if svg_out.resolve() == input_path.resolve():   # never overwrite the artwork SVG
+            svg_out = svg_out.with_name(svg_out.stem + ".toolpaths.svg")
         svg_out.parent.mkdir(parents=True, exist_ok=True)
         write_toolpaths_svg(plan(art, cfg, exclusion_zones), svg_out)
         tp, ignored = read_toolpaths_svg(svg_out)
