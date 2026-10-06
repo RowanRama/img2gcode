@@ -126,13 +126,13 @@ class Config:
     @classmethod
     def load(cls, path: Optional[Union[str, Path]] = None) -> "Config":
         """Defaults, then configs/default.cfg, then *path* (if given)."""
-        parser = configparser.ConfigParser()
-        parser.read(DEFAULT_CFG, encoding="utf-8")
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(DEFAULT_CFG, encoding="utf-8-sig")
         if path is not None:
             path = Path(path)
             if not path.exists():
                 raise FileNotFoundError(f"Config file not found: {path}")
-            parser.read(path, encoding="utf-8")
+            parser.read(path, encoding="utf-8-sig")
 
         cfg = cls()
         for f in fields(cls):
@@ -154,7 +154,7 @@ def _read_section(parser: configparser.ConfigParser, name: str, obj) -> None:
         if kind is bool:
             value = parser.getboolean(name, f.name)
         elif kind is int:
-            value = int(parser.getfloat(name, f.name))
+            value = int(round(parser.getfloat(name, f.name)))
         elif kind is float:
             value = parser.getfloat(name, f.name)
         else:

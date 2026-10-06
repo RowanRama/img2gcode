@@ -60,10 +60,10 @@ def split_rgb(left=(0, 0, 0), right=(255, 255, 255), h: int = 400, w: int = 800)
 
 def bands_rgb(values=(20, 80, 140, 200), h: int = 400, w: int = 800) -> np.ndarray:
     """Vertical grey bands, darkest on the left."""
-    img = np.empty((h, w, 3), np.uint8)
+    img = np.full((h, w, 3), values[-1], np.uint8)
     bw = w // len(values)
     for i, v in enumerate(values):
-        img[:, i * bw:(i + 1) * bw] = v
+        img[:, i * bw:(i + 1) * bw if i < len(values) - 1 else w] = v
     return img
 
 

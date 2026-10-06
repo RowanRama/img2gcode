@@ -14,7 +14,7 @@ import numpy as np
 RGB = Tuple[int, int, int]
 
 
-@dataclass
+@dataclass(eq=False)
 class Stroke:
     """One continuous extrusion path. Closed when first point == last point."""
     points: np.ndarray            # (N, 2) float64
@@ -34,7 +34,7 @@ class Region:
     tool: int
 
 
-@dataclass
+@dataclass(eq=False)
 class Artwork:
     """What a style produces: vector art on the page, not yet planned."""
     width_mm: float
@@ -51,7 +51,7 @@ class Artwork:
         return len(self.palette)
 
 
-@dataclass
+@dataclass(eq=False)
 class ToolPass:
     """Everything one tool prints on one layer, in print order."""
     tool: int
@@ -59,7 +59,7 @@ class ToolPass:
     strokes: List[Stroke] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(eq=False)
 class Toolpaths:
     """Planned output: one ToolPass per (layer, tool), layer-major."""
     width_mm: float
