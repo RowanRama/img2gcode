@@ -69,22 +69,29 @@ def _levels(values: np.ndarray, count: int) -> List[float]:
 def _separate(polys, tools, width, height, lw) -> List[Stroke]:
     """deoverlap in priority order; a line cut to less than half its length is dropped
     whole (its leftovers would be dashes) and the rest are separated again."""
-    for attempt in range(2):
-        kept = deoverlap(polys, width, height, min_sep=0.9 * lw, min_length=3 * lw)
-        if not kept:
-            return []
-        # Every vertex deoverlap keeps lies on its source line, so the nearest source owns it.
-        tree = shapely.STRtree([shapely.LineString(p) for p in polys])
-        src = tree.query_nearest(shapely.points([k[len(k) // 2] for k in kept]), all_matches=False)
-        owner = np.empty(len(kept), int)
-        owner[src[0]] = src[1]
-        got = np.bincount(owner, [polyline_length(k) for k in kept], len(polys))
-        whole = got >= 0.5 * np.array([polyline_length(p) for p in polys])
-        if attempt or whole.all():
-            break
+    kept, owner = _deoverlap_owned(polys, width, height, lw)
+    if not kept:
+        return []
+    got = np.bincount(owner, [polyline_length(k) for k in kept], len(polys))
+    whole = got >= 0.5 * np.array([polyline_length(p) for p in polys])
+    if not whole.all():
         polys = [p for p, w in zip(polys, whole) if w]
         tools = [t for t, w in zip(tools, whole) if w]
+        kept, owner = _deoverlap_owned(polys, width, height, lw)
     return [Stroke(k, tools[o]) for k, o in zip(kept, owner)]
+
+
+def _deoverlap_owned(polys, width, height, lw):
+    """deoverlap, plus the index of the source line each kept piece came from."""
+    kept = deoverlap(polys, width, height, min_sep=0.9 * lw, min_length=3 * lw)
+    if not kept:
+        return [], np.empty(0, int)
+    # Every vertex deoverlap keeps lies on its source line, so the nearest source owns it.
+    tree = shapely.STRtree([shapely.LineString(p) for p in polys])
+    src = tree.query_nearest(shapely.points([k[len(k) // 2] for k in kept]), all_matches=False)
+    owner = np.empty(len(kept), int)
+    owner[src[0]] = src[1]
+    return kept, owner
 
 
 def _palette(img: np.ndarray, fg: np.ndarray, n: int) -> List[Tuple[int, int, int]]:
