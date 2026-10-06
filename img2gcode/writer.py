@@ -1,12 +1,5 @@
-"""GCode writer.
-
-Converts ToolLayer move lists into valid GCode with:
-  - Startup sequence (homing, temperature, units)
-  - Layer change annotations
-  - Tool change commands
-  - Extrusion calculated from move length
-  - Travel lifts
-"""
+"""G-code writer. The output format is unchanged from the original writer;
+tests/data/golden_writer.gcode pins it."""
 
 from __future__ import annotations
 
@@ -14,23 +7,18 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
-
-import numpy as np
+from typing import List, Tuple, Union
 
 from .config import Config
-from .toolpath import Move, ToolLayer
+from .model import ToolPass, Toolpaths
 
-
-# Default density for filament weight estimates. PLA = 1.24 g/cm^3 is the
-# common case; if you swap to PETG / ABS / TPU the gram figure is just a
-# linear rescale of this constant.
+# Filament weight estimates assume PLA; other materials are a linear rescale.
 _PLA_DENSITY_G_CM3 = 1.24
 
 
 @dataclass
 class PrintStats:
-    """Aggregated estimates for a generated GCode file."""
+    """Aggregated estimates for a generated G-code file."""
     print_distance_mm: float
     travel_distance_mm: float
     filament_mm: float
@@ -41,241 +29,146 @@ class PrintStats:
     def total_time_min(self) -> float:
         return self.print_time_min + self.travel_time_min
 
-    def filament_grams(
-        self, filament_diameter_mm: float, density_g_cm3: float = _PLA_DENSITY_G_CM3,
-    ) -> float:
-        """Convert filament length (mm) to mass using the given density."""
+    def filament_grams(self, filament_diameter_mm: float, density_g_cm3: float = _PLA_DENSITY_G_CM3) -> float:
         radius = filament_diameter_mm / 2.0
-        cross_mm2 = math.pi * radius * radius
-        # mm^3 → cm^3 via /1000, then × density (g/cm^3)
-        return cross_mm2 * self.filament_mm * density_g_cm3 / 1000.0
+        return math.pi * radius * radius * self.filament_mm * density_g_cm3 / 1000.0
 
 
-# ------------------------------------------------------------------ #
-# Extrusion maths                                                       #
-# ------------------------------------------------------------------ #
-
-def _extrusion_length(
-    dist_mm: float,
-    cfg: Config,
-) -> float:
-    """Compute filament extrusion length for a given move distance (mm)."""
-    line_w = cfg.extrusion.effective_line_width
-    layer_h = cfg.extrusion.layer_height
+def _extrusion_length(dist_mm: float, cfg: Config) -> float:
+    volume = cfg.extrusion.effective_line_width * cfg.extrusion.layer_height * dist_mm
     fil_r = cfg.extrusion.filament_diameter / 2
-    # Volume = line_width * layer_height * distance (rectangular cross section)
-    volume = line_w * layer_h * dist_mm
-    # Filament length = volume / (pi * r^2)
-    fil_length = volume / (math.pi * fil_r**2)
-    return fil_length * cfg.extrusion.extrusion_multiplier
+    return volume / (math.pi * fil_r ** 2) * cfg.extrusion.extrusion_multiplier
 
 
-# ------------------------------------------------------------------ #
-# Writer                                                                #
-# ------------------------------------------------------------------ #
+def _pass_moves(tp: Toolpaths, ps: ToolPass) -> List[Tuple[float, float, bool]]:
+    """Machine-space moves: a travel to each stroke start, then extrusions."""
+    half_w, half_h = tp.width_mm / 2.0, tp.height_mm / 2.0
+    moves = []
+    for stroke in ps.strokes:
+        if len(stroke.points) < 2:
+            continue
+        for i, (x, y) in enumerate(stroke.points):
+            moves.append((round(float(x) - half_w, 4), round(half_h - float(y), 4), i > 0))
+    return moves
 
-class GCodeWriter:
-    def __init__(self, cfg: Config, image_shape: tuple):
-        self.cfg = cfg
-        self.H, self.W = image_shape[:2]
-        # Scale: pixel → mm
-        scale_x = cfg.machine.print_width / self.W
-        scale_y = cfg.machine.print_height / self.H
-        self.scale = min(scale_x, scale_y)
 
-    def _px_to_mm(self, x_px: float, y_px: float):
-        # Centre the print at (0, 0): image spans ±(print_dim/2) in each axis
-        half_w = self.W * self.scale / 2.0
-        half_h = self.H * self.scale / 2.0
-        x_mm = x_px * self.scale - half_w
-        y_mm = (self.H - 1 - y_px) * self.scale - half_h
-        return round(x_mm, 4), round(y_mm, 4)
-
-    def compute_stats(self, layers: List[ToolLayer]) -> PrintStats:
-        """Walk every move and tally distances, time, and filament use.
-
-        The writer also computes these inline as it serialises GCode, but
-        having them broken out in a single pass keeps the header generation
-        clean and lets callers (pipeline / GUI) read the numbers without
-        parsing the output file.
-        """
-        cfg = self.cfg
-        print_dist = 0.0
-        travel_dist = 0.0
-        filament_total = 0.0
-
-        for tl in layers:
-            if not tl.moves:
-                continue
-            prev = None
-            for move in tl.moves:
-                x_mm, y_mm = self._px_to_mm(move.x, move.y)
-                if prev is None:
-                    prev = (x_mm, y_mm)
-                    continue
-                d = math.hypot(x_mm - prev[0], y_mm - prev[1])
-                if move.extrude:
+def compute_stats(tp: Toolpaths, cfg: Config) -> PrintStats:
+    """Tally distances, time and filament. The first move of each pass is not counted."""
+    print_dist = travel_dist = filament = 0.0
+    for ps in tp.passes:
+        prev = None
+        for x, y, extrude in _pass_moves(tp, ps):
+            if prev is not None:
+                d = math.hypot(x - prev[0], y - prev[1])
+                if extrude:
                     print_dist += d
-                    filament_total += _extrusion_length(d, cfg)
+                    filament += _extrusion_length(d, cfg)
                 else:
                     travel_dist += d
-                prev = (x_mm, y_mm)
+            prev = (x, y)
+    return PrintStats(
+        print_distance_mm=print_dist,
+        travel_distance_mm=travel_dist,
+        filament_mm=filament,
+        print_time_min=print_dist / max(1.0, cfg.machine.print_speed),
+        travel_time_min=travel_dist / max(1.0, cfg.machine.travel_speed),
+    )
 
-        print_speed = max(1.0, cfg.machine.print_speed)
-        travel_speed = max(1.0, cfg.machine.travel_speed)
-        return PrintStats(
-            print_distance_mm=print_dist,
-            travel_distance_mm=travel_dist,
-            filament_mm=filament_total,
-            print_time_min=print_dist / print_speed,
-            travel_time_min=travel_dist / travel_speed,
-        )
 
-    def write(self, layers: List[ToolLayer], output_path: str | Path) -> None:
-        cfg = self.cfg
+def gcode_lines(tp: Toolpaths, cfg: Config) -> Tuple[List[str], PrintStats]:
+    """The G-code as a list of lines (no newlines), plus the stats in its header."""
+    stats = compute_stats(tp, cfg)
+    grams = stats.filament_grams(cfg.extrusion.filament_diameter)
+    W, H = tp.source_px
+    w, h = tp.width_mm, tp.height_mm
+    lw = cfg.extrusion.effective_line_width
+    if cfg.infill.line_spacing > 0:
+        spacing = cfg.infill.line_spacing
+    else:
+        spacing = lw / (max(1.0, cfg.infill.density) / 100.0)
+    travel = int(cfg.machine.travel_speed)
+    feed = int(cfg.machine.print_speed)
 
-        # Stats first so we can put them in the header.
-        stats = self.compute_stats(layers)
-        grams = stats.filament_grams(cfg.extrusion.filament_diameter)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d at %H:%M:%S UTC")
+    lines = [
+        f"; generated by img2gcode on {ts}",
+        f"; image size: {W}x{H}px → {w:.1f}x{h:.1f}mm (scale={w / W:.4f})",
+        f"; tools: {tp.n_tools}  layers: {tp.n_layers}",
+        f"; infill: {cfg.infill.pattern}  density: {cfg.infill.density:.0f}%  "
+        f"spacing: {spacing:.3f}mm  angle: {cfg.infill.angle}°",
+        f"; line_width:{lw:.4f}  perimeters: {cfg.layers.perimeter_loops}",
+        ";",
+        # Keys read by gcode_parser; keep them stable.
+        f"; estimated_print_time: {stats.print_time_min:.1f} min  "
+        f"travel_time: {stats.travel_time_min:.1f} min  "
+        f"total_time: {stats.total_time_min:.1f} min",
+        f"; print_distance: {stats.print_distance_mm:.1f} mm  "
+        f"travel_distance: {stats.travel_distance_mm:.1f} mm",
+        f"; filament: {stats.filament_mm:.1f} mm  "
+        f"({grams:.2f} g @ PLA {_PLA_DENSITY_G_CM3} g/cm³)",
+        ";",
+        "",
+        "M104 S200 ; set temperature",
+        ";TYPE:Custom",
+        "G28 ; home all axes",
+        f"G1 Z5 F{travel} ; lift nozzle",
+        "M109 S200 ; set temperature and wait",
+        "G21 ; set units to millimeters",
+        "G90 ; use absolute coordinates",
+        "M82 ; use absolute distances for extrusion",
+        "G92 E0",
+        "M107",
+        "",
+    ]
 
-        lines: List[str] = []
+    current_tool = -1
+    for layer_idx in range(tp.n_layers):
+        z = cfg.layers.layer_height * (layer_idx + 1)
+        lines += [";LAYER_CHANGE", f";Z:{z:.3f}", f";HEIGHT:{cfg.layers.layer_height:.3f}", "G92 E0"]
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d at %H:%M:%S UTC")
-        lines.append(f"; generated by img2gcode on {ts}")
-        lines.append(f"; image size: {self.W}x{self.H}px → "
-                     f"{self.W * self.scale:.1f}x{self.H * self.scale:.1f}mm "
-                     f"(scale={self.scale:.4f})")
-        lines.append(f"; tools: {cfg.tools.num_tools}  layers: {cfg.layers.num_layers}")
-        # Resolve effective spacing for the header comment
-        lw = cfg.extrusion.effective_line_width
-        if cfg.infill.line_spacing > 0:
-            eff_spacing = cfg.infill.line_spacing
-        else:
-            eff_spacing = lw / (max(1.0, cfg.infill.density) / 100.0)
-        lines.append(f"; infill: {cfg.infill.pattern}  density: {cfg.infill.density:.0f}%  "
-                     f"spacing: {eff_spacing:.3f}mm  angle: {cfg.infill.angle}°")
-        lines.append(f"; line_width:{lw:.4f}  perimeters: {cfg.layers.perimeter_loops}")
-        lines.append(";")
-        # Estimated cost lines — keep keys parser-stable so the GUI can read them.
-        lines.append(
-            f"; estimated_print_time: {stats.print_time_min:.1f} min  "
-            f"travel_time: {stats.travel_time_min:.1f} min  "
-            f"total_time: {stats.total_time_min:.1f} min"
-        )
-        lines.append(
-            f"; print_distance: {stats.print_distance_mm:.1f} mm  "
-            f"travel_distance: {stats.travel_distance_mm:.1f} mm"
-        )
-        lines.append(
-            f"; filament: {stats.filament_mm:.1f} mm  "
-            f"({grams:.2f} g @ PLA {_PLA_DENSITY_G_CM3} g/cm³)"
-        )
-        lines.append(";")
-        lines.append("")
+        for ps in (p for p in tp.passes if p.layer == layer_idx):
+            moves = _pass_moves(tp, ps)
+            if not moves:
+                continue
+            if ps.tool != current_tool:
+                lines += ["", f"; --- Tool {ps.tool} ---", f"T{ps.tool}", "G92 E0"]
+                current_tool = ps.tool
+            lines.append(";TYPE:External perimeter" if cfg.layers.perimeter_loops > 0 else ";TYPE:Infill")
 
-        # Startup
-        lines.append("M104 S200 ; set temperature")
-        lines.append(";TYPE:Custom")
-        lines.append("G28 ; home all axes")
-        lines.append(f"G1 Z5 F{int(cfg.machine.travel_speed)} ; lift nozzle")
-        lines.append("M109 S200 ; set temperature and wait")
-        lines.append("G21 ; set units to millimeters")
-        lines.append("G90 ; use absolute coordinates")
-        lines.append("M82 ; use absolute distances for extrusion")
-        lines.append("G92 E0")
-        lines.append("M107")
-        lines.append("")
-
-        current_tool = -1
-        E = 0.0  # running extrusion counter
-
-        # Group by layer
-        layer_indices = sorted(set(tl.layer_idx for tl in layers))
-        for layer_idx in layer_indices:
-            z = cfg.layers.layer_height * (layer_idx + 1)
-            lines.append(";LAYER_CHANGE")
-            lines.append(f";Z:{z:.3f}")
-            lines.append(f";HEIGHT:{cfg.layers.layer_height:.3f}")
-            lines.append("G92 E0")
+            # Every stroke starts with a travel, so prev is set before any extrusion.
             E = 0.0
+            prev = None
+            lifted = False
+            for x, y, extrude in moves:
+                if not extrude:
+                    if not lifted:
+                        lines.append(f"G1 Z{z + cfg.machine.z_lift:.3f} F{travel}")
+                        lifted = True
+                    lines.append(f"G1 X{x} Y{y} F{travel}")
+                else:
+                    if lifted:
+                        lines += [f"G1 Z{z:.3f} F{travel}", f"G1 F{feed}"]
+                        lifted = False
+                    E += _extrusion_length(math.hypot(x - prev[0], y - prev[1]), cfg)
+                    lines.append(f"G1 X{x} Y{y} E{E:.5f}")
+                prev = (x, y)
+            lines.append("G92 E0")
 
-            layer_tls = [tl for tl in layers if tl.layer_idx == layer_idx]
-            for tl in layer_tls:
-                if not tl.moves:
-                    continue
+    lines += [
+        "",
+        "; End of print",
+        "G1 Z10 F3000 ; raise Z",
+        "G28 X0 Y0 ; home X Y",
+        "M104 S0 ; turn off temperature",
+        "M84 ; disable motors",
+    ]
+    return lines, stats
 
-                # Tool change
-                if tl.tool_idx != current_tool:
-                    lines.append(f"")
-                    lines.append(f"; --- Tool {tl.tool_idx} ---")
-                    lines.append(f"T{tl.tool_idx}")
-                    lines.append("G92 E0")
-                    E = 0.0
-                    current_tool = tl.tool_idx
 
-                lines.append(f";TYPE:External perimeter" if cfg.layers.perimeter_loops > 0 else ";TYPE:Infill")
-
-                prev_x_mm: Optional[float] = None
-                prev_y_mm: Optional[float] = None
-                z_at_layer = z
-                is_lifted = False
-
-                for move in tl.moves:
-                    x_mm, y_mm = self._px_to_mm(move.x, move.y)
-
-                    if not move.extrude:
-                        # Travel move — lift Z if not already lifted
-                        if not is_lifted:
-                            lines.append(
-                                f"G1 Z{z_at_layer + cfg.machine.z_lift:.3f} "
-                                f"F{int(cfg.machine.travel_speed)}"
-                            )
-                            is_lifted = True
-                        lines.append(
-                            f"G1 X{x_mm} Y{y_mm} F{int(cfg.machine.travel_speed)}"
-                        )
-                        prev_x_mm, prev_y_mm = x_mm, y_mm
-                    else:
-                        # Print move
-                        if is_lifted:
-                            lines.append(f"G1 Z{z_at_layer:.3f} F{int(cfg.machine.travel_speed)}")
-                            lines.append(f"G1 F{int(cfg.machine.print_speed)}")
-                            is_lifted = False
-
-                        if prev_x_mm is not None:
-                            dist_mm = math.hypot(
-                                x_mm - prev_x_mm, y_mm - prev_y_mm
-                            )
-                            E += _extrusion_length(dist_mm, cfg)
-                            lines.append(
-                                f"G1 X{x_mm} Y{y_mm} E{E:.5f}"
-                            )
-                        else:
-                            # First print move — just position, no extrusion
-                            lines.append(
-                                f"G1 X{x_mm} Y{y_mm} F{int(cfg.machine.print_speed)}"
-                            )
-                        prev_x_mm, prev_y_mm = x_mm, y_mm
-
-                lines.append("G92 E0")
-                E = 0.0
-
-        # End sequence
-        lines.append("")
-        lines.append("; End of print")
-        lines.append("G1 Z10 F3000 ; raise Z")
-        lines.append("G28 X0 Y0 ; home X Y")
-        lines.append("M104 S0 ; turn off temperature")
-        lines.append("M84 ; disable motors")
-
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text("\n".join(lines))
-        print(f"[img2gcode] GCode written → {output_path}  ({len(lines)} lines)")
-        print(
-            f"[img2gcode] Estimated: {stats.total_time_min:.1f} min  "
-            f"({stats.print_time_min:.1f} print + {stats.travel_time_min:.1f} travel)  "
-            f"|  filament {stats.filament_mm:.0f} mm ({grams:.2f} g PLA)  "
-            f"|  travel {stats.travel_distance_mm:.0f} mm / "
-            f"print {stats.print_distance_mm:.0f} mm"
-        )
+def write_gcode(tp: Toolpaths, cfg: Config, path: Union[str, Path]) -> PrintStats:
+    """Write the G-code file (UTF-8, parent folders created) and return its stats."""
+    lines, stats = gcode_lines(tp, cfg)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return stats
