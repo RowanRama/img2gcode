@@ -34,6 +34,19 @@ def test_noisy_shapes_give_clean_regions(cfg):
         assert holes < 0.01 * g.area
 
 
+def test_pale_shape_on_noise_survives(cfg):
+    # The faint-component rule drops paper blotches, not real pale ink: depth 15 vs sigma about 7.
+    cfg.tools.num_tools = 2
+    img = shapes_rgb()
+    img[RECT[1]:RECT[3] + 1, RECT[0]:RECT[2] + 1] = 205
+    img = np.clip(img + np.random.default_rng(0).normal(0, 30, img.shape), 0, 255).astype(np.uint8)
+    a = make(img, cfg)
+    s = page_scale(cfg, SHAPES_W, SHAPES_H)
+    g1 = tool_geom(a, 1)
+    assert g1.area == pytest.approx((RECT[2] - RECT[0] + 1) * (RECT[3] - RECT[1] + 1) * s * s, rel=0.10)
+    assert len(list(getattr(g1, "geoms", [g1]))) == 1
+
+
 def test_background_is_not_printed(cfg):
     a = make(shapes_rgb(noise=30), cfg)
     assert unary_union([r.shape for r in a.regions]).area < 0.6 * a.width_mm * a.height_mm

@@ -1,8 +1,16 @@
 """fill: flat colour regions, robust to noise.
 
 Denoise and flatten texture, cluster colours in Lab, smooth the label map by
-majority vote, then reassign every blob or hole smaller than the minimum
-feature to its nearest surviving neighbour before vectorizing.
+majority vote, turn faint colour components back into paper, then reassign
+every blob or hole smaller than the minimum feature to its nearest surviving
+neighbour before vectorizing.
+
+Faint components (not in the spec's fill section yet): a colour component
+whose mean depth below ``image.white_threshold`` (threshold minus the darkest
+channel) is under the measured noise sigma becomes paper. Noisy light paper
+dips just under the threshold in blotches that survive majority smoothing and
+the minimum feature; real ink is far deeper. On clean images sigma is about 0,
+so the step does nothing.
 """
 
 from __future__ import annotations
