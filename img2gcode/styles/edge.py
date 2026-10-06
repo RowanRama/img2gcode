@@ -3,14 +3,18 @@
 The DoG is smoothed along the local edge direction (line-integral convolution
 over a structure-tensor tangent field), so noise averages out while edges stay
 sharp. Only the dark side of each edge responds, so an edge gives one line and
-a thin dark line gives one line, not two. Thresholds are absolute and raised to
-the measured residual noise, never percentiles.
+a thin dark line gives one line, not two. Thresholds are absolute, never percentiles.
+
+Noise is removed where it is: non-local means runs with a per-pixel strength from
+a tile-wise noise map (see _noise_map), so noise confined to shadows or a noisy
+photo inside a clean border is denoised as hard as uniform noise would be.
 
 Tuned on images/ (spec values in brackets): the DoG has no DC term, tau = 1 [0.98],
 since 0.02 * L on flat areas hid light-on-white edges such as a yellow logo; LIC
 runs over +-10 sigma [3] on a tangent field smoothed over 4 sigma [2], which turns
 grass and hair into a few flowing strokes instead of many dashes; the base
-threshold is 0.025 - 0.02 * detail [0.03 - ...].
+threshold is 0.025 - 0.02 * detail [0.03 - ...]; sigma_resid (3x in the spec, 4x here)
+is measured on the image's flattest fifth, see _residual_noise.
 """
 
 from __future__ import annotations
@@ -23,10 +27,11 @@ import numpy as np
 
 from ..geometry import deoverlap, polyline_length
 from ..model import Artwork, Stroke
-from ..raster import denoise, fit_page, foreground_mask, palette_kmeans, sample_colors, working_image
+from ..raster import denoise, estimate_noise, fit_page, foreground_mask, palette_kmeans, sample_colors, working_image
 from ..skeleton import skeleton_strokes
 
 _INK = (30, 30, 30)  # single-tool palette
+_IMMERKAER = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
 
 
 def make(rgb, cfg) -> Artwork:
@@ -37,7 +42,7 @@ def make(rgb, cfg) -> Artwork:
     width, height, s = fit_page(W, H, cfg)
     img, mmpp = working_image(rgb, s, lw / 3)
     lw_px = lw / mmpp
-    mask = _line_map(_lightness(img, cfg.edge.contrast), lw_px, detail)
+    mask = _line_map(_lightness(img, cfg.edge.contrast, lw_px), lw_px, detail)
     if cfg.edge.debug_edges_path:
         p = Path(cfg.edge.debug_edges_path)
         cv2.imencode(p.suffix or ".png", mask.astype(np.uint8) * 255)[1].tofile(str(p))
@@ -82,31 +87,77 @@ def _line_map(lum: np.ndarray, lw_px: float, detail: float) -> np.ndarray:
 
 
 def _residual_noise(dog: np.ndarray, lw_px: float) -> float:
-    """Robust sigma (MAD) of *dog* over its flattest fifth, so edges and texture do not count as noise."""
+    """Robust sigma (MAD) of *dog* over its flattest fifth, so edges and most texture do not count.
+
+    This is not what keeps noise out: after _lightness has denoised each area to its own
+    noise level, 4x it stays below the base threshold on noisy inputs (at most about 0.007
+    against 0.015 at the default detail). It only engages on images textured all over, where
+    even the flattest fifth is texture (crowd about 0.08, grass and feathers 0.02-0.03).
+    """
     energy = cv2.GaussianBlur(dog * dog, (0, 0), 4 * lw_px)
     flat = dog[energy <= np.quantile(energy, 0.2)]
     return 1.4826 * float(np.median(np.abs(flat - np.median(flat))))
 
 
-def _lightness(img: np.ndarray, contrast: float) -> np.ndarray:
+def _lightness(img: np.ndarray, contrast: float, lw_px: float) -> np.ndarray:
     """Lab lightness in [0, 1] (float32): CLAHE-equalised when *contrast* > 0, then denoised.
 
     Denoising after CLAHE measures (and removes) the noise CLAHE amplified; denoising
     the colour image first leaves dark areas noisy, since L* stretches the darks.
+    The strength follows _noise_map: NLM runs at steps of x1.5 from the lowest to the
+    highest sigma in the map, and each pixel interpolates between its two nearest steps.
     """
     L = cv2.cvtColor(img, cv2.COLOR_RGB2Lab)[..., 0]
     if contrast > 0:
         L = cv2.createCLAHE(clipLimit=contrast, tileGridSize=(8, 8)).apply(L)
-    return denoise(L).astype(np.float32) / 255.0
+    sig = _noise_map(L, lw_px)
+    base = max(1.5, float(sig.min()))                   # denoise() leaves sigma <= 1.5 alone
+    u = np.log(np.maximum(sig, base) / base) / np.log(1.5)
+    out = sum(np.maximum(0.0, 1.0 - np.abs(u - k)) * denoise(L, base * 1.5 ** k).astype(np.float32)
+              for k in range(int(np.ceil(u.max())) + 1))
+    return (out / 255.0).astype(np.float32)
+
+
+def _noise_map(L: np.ndarray, lw_px: float) -> np.ndarray:
+    """Per-pixel noise sigma (0-255) of uint8 *L*: the global estimate, raised where a tile is noisier.
+
+    Each tile (10 lw_px) gets a median-based Immerkaer estimate, which edges barely move.
+    Fine oriented structure (engraving hatching, grass, hair) reads as noise at this
+    scale too, so a tile counts only as far as its structure tensor is isotropic: median
+    coherence <= 0.1 counts fully, >= 0.2 not at all (pure noise measures about 0.07,
+    Duerer hatching 0.15-0.45). The tile grid is dilated by one tile, so the rim of a
+    noisy area is covered, and interpolated bilinearly.
+    """
+    g = L.astype(np.float32)
+    jxx, jxy, jyy = _structure_tensor(g, 2 * lw_px)
+    coherence = np.sqrt((jxx - jyy) ** 2 + 4 * jxy ** 2) / (jxx + jyy + 1e-6)
+    lap = np.abs(cv2.filter2D(g, -1, _IMMERKAER, borderType=cv2.BORDER_REFLECT))
+    tile = 10 * lw_px
+    sig = _tile_median(lap, tile) / (0.6745 * 6)       # median |N(0, 6 sigma)| = 0.6745 * 6 sigma
+    sig *= np.clip((0.2 - _tile_median(coherence, tile)) / 0.1, 0.0, 1.0)
+    sig = cv2.dilate(np.maximum(sig, estimate_noise(L)), np.ones((3, 3), np.uint8))
+    return cv2.resize(sig, (L.shape[1], L.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def _tile_median(a: np.ndarray, tile: float) -> np.ndarray:
+    """Median of *a* over a grid of tiles about *tile* px square (float32 grid)."""
+    H, W = a.shape
+    ys = np.linspace(0, H, max(1, round(H / tile)) + 1).astype(int)
+    xs = np.linspace(0, W, max(1, round(W / tile)) + 1).astype(int)
+    return np.array([[np.median(a[y0:y1, x0:x1]) for x0, x1 in zip(xs, xs[1:])]
+                     for y0, y1 in zip(ys, ys[1:])], np.float32)
+
+
+def _structure_tensor(g: np.ndarray, sigma: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(Jxx, Jxy, Jyy): Sobel gradient products smoothed over *sigma*."""
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    return tuple(cv2.GaussianBlur(a, (0, 0), sigma) for a in (gx * gx, gx * gy, gy * gy))
 
 
 def _tangent_field(g: np.ndarray, sigma: float) -> Tuple[np.ndarray, np.ndarray]:
     """Unit vectors along the edges: the structure tensor's minor eigenvector, smoothed over *sigma*."""
-    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
-    jxx = cv2.GaussianBlur(gx * gx, (0, 0), sigma)
-    jxy = cv2.GaussianBlur(gx * gy, (0, 0), sigma)
-    jyy = cv2.GaussianBlur(gy * gy, (0, 0), sigma)
+    jxx, jxy, jyy = _structure_tensor(g, sigma)
     theta = 0.5 * np.arctan2(2 * jxy, jxx - jyy)       # gradient direction; the tangent is 90° off
     return (-np.sin(theta)).astype(np.float32), np.cos(theta).astype(np.float32)
 
