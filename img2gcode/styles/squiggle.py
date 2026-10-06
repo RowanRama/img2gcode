@@ -4,6 +4,9 @@ Each row is a sine wave around its centreline. Darkness raises both its
 frequency and its amplitude, so tone reads as ink density. Rows stop where the
 image is paper-white and alternate direction, so the end of one row joins the
 start of the next into a serpentine stroke.
+
+Darkness is D = sqrt(1 - L). Frequency and amplitude both scale with D, so the
+extra ink grows with D^2; the root keeps it closer to linear in tone.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from typing import List, Tuple
 
 import cv2
 import numpy as np
-from scipy.ndimage import map_coordinates, median_filter
+from scipy.ndimage import distance_transform_edt, map_coordinates, median_filter
 
 from ..geometry import simplify
 from ..model import Artwork, Stroke
@@ -29,10 +32,10 @@ def make(rgb, cfg) -> Artwork:
     width, height, mm_per_src = fit_page(W, H, cfg)
     img, mmpp = working_image(rgb, mm_per_src, step)
     img = denoise(img)
+    ink = foreground_mask(img, cfg.image.white_threshold)
     # A light blur keeps leftover noise in paper areas from breaking it into specks.
     fg = foreground_mask(cv2.GaussianBlur(img, (0, 0), lw / 2 / mmpp), cfg.image.white_threshold)
-    sigma = sp / 2 / mmpp
-    dark = _tone(np.clip(1.0 - cv2.GaussianBlur(luminance(img), (0, 0), sigma), 0.0, 1.0), fg)
+    dark = np.sqrt(np.clip(1.0 - cv2.GaussianBlur(luminance(img), (0, 0), sp / 2 / mmpp), 0.0, 1.0))
 
     # Samples every lw/4 along each row centreline; rows k = 0, 1, ... at y = (k + 0.5) * sp.
     xs = (np.arange(int(width / step)) + 0.5) * step
@@ -46,20 +49,27 @@ def make(rgb, cfg) -> Artwork:
 
     palette = list(SINGLE_TOOL_PALETTE)
     tools = np.zeros(present.shape, int)
-    if cfg.tools.num_tools > 1 and fg.any():
-        pal, _ = palette_kmeans(img, fg, cfg.tools.num_tools)
+    if cfg.tools.num_tools > 1 and ink.any():
+        pal, _ = palette_kmeans(img, ink, cfg.tools.num_tools)
         palette = [tuple(int(v) for v in c) for c in pal]
         if len(pal) > 1 and present.size:
-            colour = _lab(_foreground_colour(img, fg, sigma)[grid])
+            colour = _lab(img[grid])
             tools = ((colour[..., None, :] - _lab(pal[None])[0]) ** 2).sum(axis=-1).argmin(axis=-1)
+            # Colour is read at least lw/2 inside the ink. Samples nearer the paper (antialiased
+            # edges, and the light blur's halo of paper) take the tool of the nearest such sample.
+            core = (distance_transform_edt(ink) * mmpp > lw / 2)[grid]
+            if core.any():
+                near = distance_transform_edt(~core, sampling=(sp, step), return_distances=False, return_indices=True)
+                tools = tools[tuple(near)]
 
     max_gap = int(round(2 * lw / step))
     median_size = int(round(4 * lw / step)) | 1
+    min_run = median_size // 2
     rows: List[List[Tuple[np.ndarray, int]]] = []
     for k in range(len(ys)):
         pieces = []
         for s, e in _pieces(present[k], max_gap):
-            for a, b, t in _runs(median_filter(tools[k, s:e], median_size, mode="nearest")):
+            for a, b, t in _tool_runs(tools[k, s:e], median_size, min_run):
                 if b - a >= 2:
                     pieces.append((np.c_[xs[s + a:s + b], y[k, s + a:s + b]], t))
         if k % 2:
@@ -68,19 +78,6 @@ def make(rgb, cfg) -> Artwork:
 
     strokes = [Stroke(simplify(p, 0.02 * lw), tool=t) for p, t in _serpentine(rows, sp)]
     return Artwork(width, height, [], strokes, palette, (W, H), rgb, "squiggle")
-
-
-def _tone(dark: np.ndarray, fg: np.ndarray) -> np.ndarray:
-    """Stretch the foreground's darkness so its darkest 2 % wiggle fully, then take the root.
-
-    Frequency and amplitude both scale with D, so the extra ink grows with D²; the
-    root makes it grow about linearly with tone. Without the stretch, photos (mostly
-    mid-tones) come out as near-uniform rows.
-    """
-    if not fg.any():
-        return dark
-    lo, hi = np.percentile(dark[fg], [2, 98])
-    return np.sqrt(np.clip(1.0 - (hi - dark) / max(hi - lo, 0.3), 0.0, 1.0))
 
 
 def _pieces(present: np.ndarray, max_gap: int) -> List[Tuple[int, int]]:
@@ -96,8 +93,30 @@ def _pieces(present: np.ndarray, max_gap: int) -> List[Tuple[int, int]]:
     return out
 
 
+def _tool_runs(tools: np.ndarray, median_size: int, min_run: int) -> List[Tuple[int, int, int]]:
+    """Median-filter a piece's tools, then hand each run shorter than min_run to its longer neighbour.
+
+    The median removes runs shorter than half its window between equal neighbours, but
+    leaves a monotone 0 -> 1 -> 2 step and runs at a piece's end alone (an antialiased
+    edge leaves both). min_run = half the window extends the same resolution to them.
+    """
+    tools = median_filter(tools, median_size, mode="nearest")
+    while True:
+        runs = _runs(tools)
+        if len(runs) < 2:
+            return runs
+        lengths = [e - s for s, e, _ in runs]
+        i = int(np.argmin(lengths))
+        if lengths[i] >= min_run:
+            return runs
+        j = i - 1 if i == len(runs) - 1 or (i > 0 and lengths[i - 1] >= lengths[i + 1]) else i + 1
+        tools[runs[i][0]:runs[i][1]] = runs[j][2]
+
+
 def _runs(values: np.ndarray) -> List[Tuple[int, int, int]]:
     """(start, end, value) for each run of equal values."""
+    if len(values) == 0:
+        return []
     cut = np.flatnonzero(np.diff(values)) + 1
     starts, ends = np.r_[0, cut], np.r_[cut, len(values)]
     return [(int(s), int(e), int(values[s])) for s, e in zip(starts, ends)]
@@ -142,10 +161,3 @@ def _serpentine(rows, sp: float) -> List[Tuple[np.ndarray, int]]:
 
 def _lab(rgb: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(np.asarray(rgb, np.float32) / 255.0, cv2.COLOR_RGB2Lab)
-
-
-def _foreground_colour(img: np.ndarray, fg: np.ndarray, sigma: float) -> np.ndarray:
-    """RGB of the nearby foreground (paper ignored), blurred with sigma px; white where there is none."""
-    w = cv2.GaussianBlur(fg.astype(np.float32), (0, 0), sigma)[..., None]
-    rgb = cv2.GaussianBlur(img.astype(np.float32) * fg[..., None], (0, 0), sigma)
-    return np.where(w > 1e-3, np.clip(rgb / np.maximum(w, 1e-3), 0, 255), 255.0).astype(np.float32)
