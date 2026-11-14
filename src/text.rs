@@ -80,9 +80,28 @@ pub fn system_fonts() -> Arc<usvg::fontdb::Database> {
         .get_or_init(|| {
             let mut db = usvg::fontdb::Database::new();
             db.load_system_fonts();
+            map_generic_families(&mut db);
             Arc::new(db)
         })
         .clone()
+}
+
+/// Point `sans-serif`, `serif` and `monospace` at fonts that are installed.
+/// fontdb's defaults are Arial, Times New Roman and Courier New, which most
+/// Linux systems lack, and text in a missing family draws nothing.
+fn map_generic_families(db: &mut usvg::fontdb::Database) {
+    let installed = |name: &str| db.faces().any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+    let pick = |candidates: &[&str]| candidates.iter().find(|c| installed(c)).map(|c| c.to_string());
+    let any = db.faces().next().and_then(|f| f.families.first()).map(|(n, _)| n.clone());
+    let sans = pick(&["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans", "Noto Sans", "FreeSans"]).or(any);
+    let Some(sans) = sans else { return };
+    let serif = pick(&["Times New Roman", "Liberation Serif", "DejaVu Serif", "Noto Serif", "FreeSerif"]);
+    let mono = pick(&["Courier New", "Liberation Mono", "DejaVu Sans Mono", "Noto Sans Mono", "FreeMono"]);
+    db.set_serif_family(serif.unwrap_or_else(|| sans.clone()));
+    db.set_monospace_family(mono.unwrap_or_else(|| sans.clone()));
+    db.set_cursive_family(sans.clone());
+    db.set_fantasy_family(sans.clone());
+    db.set_sans_serif_family(sans);
 }
 
 /// One installed font face under the name people know it by.
@@ -127,7 +146,8 @@ const GENERIC: [&str; 5] = ["sans-serif", "serif", "monospace", "cursive", "fant
 /// fixes (`None` when `name` is a family and the item's bold/italic decide).
 fn resolve(name: &str) -> Option<(String, Option<(u16, bool)>)> {
     let db = system_fonts();
-    if GENERIC.iter().any(|g| g.eq_ignore_ascii_case(name))
+    // With no fonts at all a generic name would silently draw nothing.
+    if (GENERIC.iter().any(|g| g.eq_ignore_ascii_case(name)) && !db.is_empty())
         || db.faces().any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
     {
         return Some((name.to_string(), None));
@@ -373,6 +393,34 @@ mod tests {
         for p in inked {
             assert!(p[0] >= b[0] - tol && p[0] <= b[2] + tol && p[1] >= b[1] - tol && p[1] <= b[3] + tol, "{p:?}");
         }
+    }
+
+    #[test]
+    fn generic_families_draw_with_whatever_fonts_are_installed() {
+        if system_fonts().is_empty() {
+            return;
+        }
+        for g in ["sans-serif", "serif", "monospace"] {
+            let item = TextItem { content: "Hi".into(), font: g.into(), ..Default::default() };
+            assert!(render(&item, 1.0).unwrap().is_some(), "{g} drew nothing");
+        }
+    }
+
+    #[test]
+    fn generic_families_fall_back_to_an_installed_font() {
+        // A machine whose only font is not Arial, like a bare Linux install.
+        let Some(path) = system_fonts().faces().find_map(|f| match &f.source {
+            usvg::fontdb::Source::File(p) if !f.families.iter().any(|(n, _)| n == "Arial") => Some(p.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let mut db = usvg::fontdb::Database::new();
+        db.load_font_file(&path).unwrap();
+        let only = db.faces().next().unwrap().families[0].0.clone();
+        map_generic_families(&mut db);
+        assert_eq!(db.family_name(&usvg::fontdb::Family::SansSerif), only);
+        assert_eq!(db.family_name(&usvg::fontdb::Family::Monospace), only);
     }
 
     #[test]

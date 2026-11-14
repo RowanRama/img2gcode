@@ -1,6 +1,6 @@
 [package]
 name = "img2gcode"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Convert images, photos and SVGs into smooth multi-tool G-code, with a live-preview GUI"
@@ -60,7 +60,7 @@ Fill mode prints each colour as perimeters plus infill; edge mode traces \
 detected edges as strokes. Includes a live-preview GUI and the img2gcode CLI."""
 depends = "$auto"
 # The GUI loads these at run time; the CLI needs none of them.
-recommends = "libgl1, libegl1, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0"
+recommends = "libgl1, libegl1, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0, fonts-dejavu-core"
 assets = [
     ["target/release/img2gcode", "usr/bin/", "755"],
     ["packaging/linux/img2gcode.desktop", "usr/share/applications/", "644"],
