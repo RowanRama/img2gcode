@@ -1,0 +1,107 @@
+# Push a tag like v0.2.0 to build and publish a release:
+#   Windows: portable zip + installer (Inno Setup)
+#   Linux:   .deb + tar.gz with install.sh
+# Run it by hand (Actions > release > Run workflow) to build without publishing.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $name = "img2gcode-$v-windows-x64-portable"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item target/release/img2gcode.exe, target/release/img2gcode-gui.exe, README.md, configs/default.toml "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse "dist/$name"
+          # Inno Setup 6 or 7, wherever the runner (or choco) put it.
+          $find = { Get-ChildItem $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter ISCC.exe -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }
+          $iscc = & $find
+          if (-not $iscc) { choco install innosetup -y --no-progress | Out-Null; $iscc = & $find }
+          Write-Output "Using $iscc"
+          & $iscc "/DVersion=$v" packaging/windows/img2gcode.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  linux:
+    # The oldest supported runner, so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          name="img2gcode-$v-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/img2gcode packaging/linux/install.sh packaging/linux/img2gcode.desktop README.md configs/default.toml "dist/$name/"
+          cp assets/icon.png "dist/$name/img2gcode.png"
+          chmod +x "dist/$name/img2gcode" "dist/$name/install.sh"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -r "dist/$name"
+          cargo install cargo-deb --locked
+          cargo deb --no-build --output dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            ## Downloads
+
+            **Windows**
+            - `img2gcode-…-windows-x64-setup.exe`: installer. No admin needed; tick "Add img2gcode to PATH" to use the CLI from any terminal. Adds a Start menu entry and an uninstaller.
+            - `img2gcode-…-windows-x64-portable.zip`: unzip and run. `img2gcode-gui.exe` opens the GUI, `img2gcode.exe` is the CLI.
+
+            **Linux (x86_64)**
+            - `img2gcode_…_amd64.deb`: Debian / Ubuntu: `sudo apt install ./img2gcode_*.deb`. Installs `/usr/bin/img2gcode` and a menu entry.
+            - `img2gcode-…-linux-x86_64.tar.gz`: any distro: unpack and run `./install.sh` (to `~/.local`, or `/usr/local` as root).
+
+            ## Quick start
+
+            ```
+            img2gcode                                # GUI
+            img2gcode convert logo.png --size 300x200
+            img2gcode convert photo.jpg --mode edge --preview preview.png
+            img2gcode config > my.toml
+            ```
+
+            See the README for every option.

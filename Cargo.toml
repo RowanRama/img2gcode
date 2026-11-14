@@ -1,0 +1,70 @@
+[package]
+name = "img2gcode"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Convert images, photos and SVGs into smooth multi-tool G-code, with a live-preview GUI"
+license = "MIT"
+repository = "https://github.com/RowanRama/img2gcode"
+
+[[bin]]
+name = "img2gcode"
+path = "src/main.rs"
+
+# The same GUI without a console window, for Start menu shortcuts on
+# Windows; `img2gcode` stays the CLI.
+[[bin]]
+name = "img2gcode-gui"
+path = "src/bin/img2gcode-gui.rs"
+required-features = ["gui"]
+
+[features]
+default = ["gui"]
+# The GUI pulls in eframe and native file dialogs; build with
+# --no-default-features for a CLI-only binary on headless machines.
+gui = ["dep:eframe", "dep:rfd"]
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "tiff"] }
+rayon = "1.10"
+resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+rfd = { version = "0.18", optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Image processing is unusably slow without optimisation; keep test and dev
+# builds fast to run.
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# `cargo deb --no-build` after `cargo build --release` (Linux).
+[package.metadata.deb]
+maintainer = "RowanRama"
+section = "graphics"
+priority = "optional"
+extended-description = """\
+Converts raster images, photos and SVGs into smooth multi-tool G-code. \
+Fill mode prints each colour as perimeters plus infill; edge mode traces \
+detected edges as strokes. Includes a live-preview GUI and the img2gcode CLI."""
+depends = "$auto"
+# The GUI loads these at run time; the CLI needs none of them.
+recommends = "libgl1, libegl1, libx11-6, libxcursor1, libxrandr2, libxi6, libxkbcommon-x11-0"
+assets = [
+    ["target/release/img2gcode", "usr/bin/", "755"],
+    ["packaging/linux/img2gcode.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/img2gcode.png", "644"],
+    ["configs/default.toml", "usr/share/doc/img2gcode/default.toml", "644"],
+    ["README.md", "usr/share/doc/img2gcode/README.md", "644"],
+]

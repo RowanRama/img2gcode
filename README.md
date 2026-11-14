@@ -1,107 +1,129 @@
 # img2gcode
 
-Convert raster images, photos, and SVGs into multi-tool FDM GCode.
+Convert images, photos and SVGs into smooth multi-tool G-code, with a live
+preview GUI for Windows and Linux and a small CLI.
 
-Two generation modes:
+- **fill** mode: splits the image by colour (K-means, or an SVG's own fill
+  colours), one tool per colour, and draws each region as perimeters plus
+  infill. Best for logos, text, flat-colour art and SVGs.
+- **edge** mode: detects edges (CLAHE, bilateral filter, multi-scale Canny),
+  thins them and traces them as continuous strokes. Best for portraits and
+  photos.
 
-- **fill** — segments the image by colour (K-Means), traces perimeters, and fills each region with a configurable zigzag infill. One tool per colour cluster. Best for logos, flat-colour illustrations, and SVGs.
-- **edge** — Canny edge detection with CLAHE enhancement and multi-scale gradient stacking, then traces the resulting line drawing as continuous polylines. Best for portraits and photos where you want internal feature detail (eyes, jawline, hair) rather than solid-colour fills.
+Paths are smooth rather than pixel-stepped. Fill mode cuts perimeters and
+infill ends from a smoothed signed distance field with sub-pixel iso-lines.
+Edge strokes are smoothed along their length. Both are then simplified to a
+tolerance in mm, so the G-code has few, evenly spaced points.
 
-SVGs go through a vector-aware path: every distinct `fill` colour becomes its own tool with no K-Means.
+## Install
 
----
+Download from [Releases](https://github.com/RowanRama/img2gcode/releases):
 
-## Installation
+- **Windows installer** (`…-windows-x64-setup.exe`): no admin needed. Tick
+  *Add img2gcode to PATH* to use the CLI from any terminal; the GUI goes in
+  the Start menu. Uninstall from Settings > Apps.
+- **Windows portable** (`…-windows-x64-portable.zip`): unzip anywhere.
+  `img2gcode-gui.exe` opens the GUI, `img2gcode.exe` is the CLI.
+- **Debian / Ubuntu** (`…_amd64.deb`): `sudo apt install ./img2gcode_*.deb`
+  puts `img2gcode` in `/usr/bin` and the GUI in the application menu.
+- **Other Linux** (`…-linux-x86_64.tar.gz`): unpack and run `./install.sh`
+  (installs to `~/.local`, or `/usr/local` as root; `--uninstall` removes it).
 
-Requires Python ≥ 3.9.
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is
+pushed.
+
+## Build
+
+Requires Rust 1.88+.
 
 ```bash
-git clone git@github.com:RowanRama/img2gcode.git
-cd img2gcode
-pip install -e .
+cargo build --release            # target/release/img2gcode(.exe)
+cargo install --path .           # or put it on PATH
 ```
 
----
+Linux needs a C linker only; at run time the GUI uses X11 or Wayland with
+OpenGL, and file dialogs go through xdg-desktop-portal. For a machine without
+a display, build the CLI alone: `cargo build --release --no-default-features`.
 
-## Usage
+## CLI
 
 ```bash
-# Default fill mode — opens the visualiser when done
-python -m img2gcode -i logo.png -o out.gcode
-
-# Edge mode for portraits / line drawings
-python -m img2gcode -i portrait.jpg -o out.gcode --mode edge --n-tools 1
-
-# SVG input (one tool per fill colour)
-python -m img2gcode -i logo.svg -o out.gcode
-
-# Headless (skip the GUI)
-python -m img2gcode -i logo.png -o out.gcode --headless
-
-# Custom config
-python -m img2gcode -i logo.png -o out.gcode -c my_config.cfg
-
-# Override the tool count
-python -m img2gcode -i logo.png -o out.gcode --n-tools 3
-
-# Fill mode — interactive ROI selection (draw rectangles to leave hollow)
-python -m img2gcode -i logo.png -o out.gcode --select-roi
-
-# Edge mode — save the pre-trace edge map for tuning
-python -m img2gcode -i portrait.jpg -o out.gcode --mode edge --debug-edges edges.png
-
-# Visualise an existing GCode file
-python -m img2gcode --visualise out.gcode
+img2gcode                                   # open the GUI
+img2gcode gui logo.png                      # open the GUI on an image
+img2gcode convert logo.png                  # writes logo.gcode next to it
+img2gcode convert logo.svg -o out.gcode --size 300x200
+img2gcode convert logo.png --preview logo-preview.png
+img2gcode convert face.jpg --mode edge --set edge.collapse=1.0
+img2gcode convert logo.png -c my.toml --set infill.density=40 --set layers.count=3
+img2gcode view out.gcode                    # preview an existing G-code file
+img2gcode config > my.toml                  # start a config file
 ```
 
-If installed via `pip install .` the `img2gcode` command is available on `$PATH`.
-
-### CLI flags
-
-| Flag | Description |
+| Option | |
 |---|---|
-| `-i, --input PATH` | Input image (PNG / JPG / BMP / SVG). Required unless `--visualise`. |
-| `-o, --output PATH` | Output GCode path. Required unless `--visualise`. |
-| `-c, --config PATH` | Override the default `.cfg` file. |
-| `--mode {fill,edge}` | Generation mode. Overrides `[mode] type` in the config. |
-| `--n-tools N` | Override the number of tools / colour clusters. Ignored for SVG. |
-| `--select-roi` | Fill mode only — open a window to draw rectangles excluded from infill. |
-| `--debug-edges PATH` | Edge mode only — save the pre-trace edge map as a PNG for tuning. |
-| `--headless` | Skip the GUI after generation. |
-| `--visualise PATH` | Open the GUI for an already-generated GCode file (no conversion). |
-| `-q, --quiet` | Suppress progress output. |
+| `-o, --output FILE` | Output G-code (default: input name with `.gcode`) |
+| `-c, --config FILE` | Config file (TOML) |
+| `--mode fill\|edge` | Generation mode |
+| `--tools N` | Number of colours / tools |
+| `--size WxH` | Print area in mm; the image is scaled to fit, aspect kept. One number means a square |
+| `--set key=value` | Any config key, repeatable: `--set infill.angle=0` |
+| `--preview PNG` | Also save a picture of the toolpaths at printed line width |
+| `--debug-edges PNG` | Edge mode: save the detected edge map, for tuning |
+| `-q, --quiet` | Print nothing but errors |
 
----
+## GUI
+
+Every parameter is on the left; any change regenerates on a background
+thread and the canvas updates within milliseconds (loading, colour
+segmentation and edge detection are cached, so most changes skip them).
+
+- Open an image, SVG or G-code file, or drop one on the window.
+- The canvas shows the print area as white paper, toolpaths at their real
+  line width, each tool in its image colour (infill a little lighter).
+  Drag to pan, scroll to zoom, double-click to fit.
+- Bottom bar: travel moves, source image overlay, line width on/off, layer
+  filter, and a progress slider that replays the print order.
+- Infill exclusions: turn on *Draw exclusions* and drag rectangles where
+  infill should be left out; right-click one to remove it.
+- Save and load the configuration as TOML; *Export G-code* writes the file.
 
 ## Configuration
 
-All settings live in a single `.cfg` file (INI format). Start by copying `configs/default.cfg`:
+`img2gcode config` prints the default file with every key documented
+(`configs/default.toml`). Every key is optional. The main sections:
 
-```bash
-cp configs/default.cfg my_config.cfg
-python -m img2gcode -i logo.png -o out.gcode -c my_config.cfg
-```
-
-Sections that matter most:
-
-- **`[mode]`** — `type = fill` or `edge`.
-- **`[machine]`** — bed dimensions, print area, travel/print speeds, Z lift.
-- **`[tools]`** — `num_tools`, custom tool-change GCode.
-- **`[image]`** — `white_threshold`, `min_cluster_area` (segmentation cleanup).
-- **`[layers]`** — `num_layers`, `layer_height`, `perimeter_loops`.
-- **`[infill]`** — fill mode pattern, `density`, `angle`, `connect_lines`.
-- **`[extrusion]`** — `filament_diameter`, `nozzle_diameter`, `line_width_mm`, `extrusion_multiplier`.
-- **`[edge]`** — edge mode: CLAHE strength, multi-scale Canny sigmas, parallel-edge collapse, polyline chaining, and stroke-separation tolerances. The default config has every field documented inline.
+- `[canvas]` print area (`width`, `height`) and where its centre lands.
+- `[extrusion]` nozzle, line width, filament, multiplier.
+- `[layers]` count, height, perimeters, `perimeter_inset`.
+- `[image]` `tools`, `white_threshold`, `min_area`, `resolution`, `trim`
+  (crop white margins so the drawing itself fills the canvas).
+- `[infill]` `density` or `spacing`, `angle`, `connect` (serpentine), `overlap`.
+- `[path]` `smoothing` (px) and `tolerance` (mm): smoother curves vs detail.
+- `[edge]` edge-mode detection and stroke settings.
+- `[gcode]` start, tool-change and end blocks with `{tool}`,
+  `{travel_speed}` and `{print_speed}` placeholders.
+- `exclusions` infill exclusion rectangles as image fractions.
 
 ### Tuning edge mode
 
-Edge mode has a few interacting knobs. The intended workflow:
+1. Run with `--debug-edges edges.png` (or watch the GUI). If the edges are
+   wrong, tune detection: `clahe_clip`, `bilateral_d`, `scales`, or pin
+   `canny_low` / `canny_high`.
+2. If the edges are right but the strokes look fragmented: raise `collapse`
+   toward 1.0 to merge close parallel edges, raise `chain_gap` to join broken
+   strokes, or lower `min_separation` to let nearby strokes coexist.
+3. Chunkier strokes: `collapse` 1.5. Maximum texture: add `0` to `scales`.
 
-1. Run with `--debug-edges edges.png` and check the edge map. If it's already wrong, tune **detection**: `clahe_clip`, `bilateral_d`, `detection_scales`, or pin `canny_low` / `canny_high`.
-2. If the edge map is right but the gcode looks fragmented, tune the **trace stage**: raise `collapse_factor` toward 1.0 to merge close parallel edges, raise `chain_gap_factor` to stitch broken polylines, or lower `min_separation_factor` to let nearby strokes coexist.
-3. Want chunkier strokes → raise `collapse_factor` to 1.5. Want maximum texture detail → put `0` in `detection_scales`
+## Development
 
----
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+IMG2GCODE_LAYOUT_PROBE=1 cargo run -- gui some.png   # GUI layout-shift check
+```
+
+The layout probe steps the GUI through results arriving, canvas and tool
+changes and an error, then reports any control whose position changed.
 
 ## License
 

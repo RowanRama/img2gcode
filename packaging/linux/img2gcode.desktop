@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=img2gcode
+GenericName=Image to G-code
+Comment=Convert images, photos and SVGs into smooth multi-tool G-code
+Exec=img2gcode gui %f
+Icon=img2gcode
+Terminal=false
+Categories=Graphics;Engineering;
+MimeType=image/png;image/jpeg;image/bmp;image/gif;image/webp;image/tiff;image/svg+xml;
