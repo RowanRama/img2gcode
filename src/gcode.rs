@@ -24,7 +24,9 @@ fn num(v: f64) -> String {
 }
 
 fn fill(template: &str, cfg: &Config, tool: usize) -> String {
+    // A config saved on Windows may carry CRLF; the G-code is LF throughout.
     template
+        .replace("\r\n", "\n")
         .replace("{travel_speed}", &num(cfg.machine.travel_speed))
         .replace("{print_speed}", &num(cfg.machine.print_speed))
         .replace("{tool}", &tool.to_string())
@@ -297,6 +299,15 @@ mod tests {
         // (0,0) -> (2,2), then (8,2) -> (20,0).
         assert!((s.travel_mm - (2f64.hypot(2.0) + 12f64.hypot(2.0))).abs() < 1e-9);
         assert!(s.filament_g > 0.0);
+    }
+
+    #[test]
+    fn crlf_templates_are_written_as_lf() {
+        let mut cfg = Config::default();
+        cfg.gcode.start = "G28\r\nG92 E0\r\n".into();
+        let g = write(&job(), &cfg, "x");
+        assert!(!g.contains('\r'));
+        assert!(g.contains(";\nG28\nG92 E0\n"));
     }
 
     #[test]

@@ -1,0 +1,5 @@
+# Keep LF everywhere: configs/default.toml is compiled in and compared
+# byte for byte, and install.sh must run on Linux.
+* text=auto eol=lf
+*.png binary
+*.ico binary
