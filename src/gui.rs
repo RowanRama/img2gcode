@@ -1362,16 +1362,18 @@ mod tests {
         out.textures_delta.clear();
     }
 
-    /// Run frames until the worker's result is in.
+    /// Run frames until the worker's result is in. The first text job loads
+    /// every installed font, which took over 5 s on a busy CI runner.
     fn settle(ctx: &egui::Context, app: &mut App) {
-        for _ in 0..500 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
             frame(ctx, app, vec![]);
             if app.shown.is_some() && !app.busy {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        panic!("no result: {:?}", app.error);
+        panic!("no result after 60 s: {:?}", app.error);
     }
 
     fn screen(app: &App, p: [f64; 2]) -> Pos2 {
