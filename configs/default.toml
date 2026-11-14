@@ -119,3 +119,18 @@ G28 X0 Y0 ; home X Y
 M104 S0 ; heater off
 M84 ; motors off
 """
+
+# Text from any installed font (`img2gcode fonts` lists them), placed on the
+# canvas in mm, independently of the image. Repeat the block for more text.
+# With no image at all, the job is just the text.
+#
+# [[text]]
+# content = "Rowan Wuz Here"   # "\n" starts a new line
+# font = "Arial Black"         # family name, or sans-serif / serif / monospace
+# size = 40.0                  # mm, the font size (capitals are ~0.7 of it)
+# x = 0.0                      # mm, centre of the text block
+# y = -250.0
+# bold = false
+# italic = false
+# infill = true                # false = outlines only
+# tool = 0

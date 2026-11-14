@@ -1,7 +1,6 @@
 //! Loading raster images and SVGs into one RGBA buffer at processing size.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use image::{RgbaImage, imageops::FilterType};
 use resvg::{tiny_skia, usvg};
@@ -69,10 +68,11 @@ fn resample(img: RgbaImage, resolution: u32) -> RgbaImage {
 /// drawing's bounding box is rendered, at full resolution, instead of the
 /// whole page.
 pub fn load_svg(data: &[u8], dir: Option<&Path>, resolution: u32, trim: Option<u8>) -> Result<Loaded, Error> {
-    let mut opt = usvg::Options { resources_dir: dir.map(Path::to_path_buf), ..Default::default() };
-    let mut db = usvg::fontdb::Database::new();
-    db.load_system_fonts();
-    opt.fontdb = Arc::new(db);
+    let opt = usvg::Options {
+        resources_dir: dir.map(Path::to_path_buf),
+        fontdb: crate::text::system_fonts(),
+        ..Default::default()
+    };
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| Error::Svg(e.to_string()))?;
     let size = tree.size();
     let s = resolution as f32 / size.width().max(size.height()).max(1e-3);

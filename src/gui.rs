@@ -45,7 +45,7 @@ pub fn run(cfg: Config, input: Option<PathBuf>, gcode_file: Option<PathBuf>) -> 
 
 struct Job {
     generation: u64,
-    input: PathBuf,
+    input: Option<PathBuf>,
     cfg: Config,
 }
 
@@ -101,12 +101,23 @@ struct App {
     draw_exclusions: bool,
     drag_from: Option<[f64; 2]>,
     probe_run: Option<ProbeRun>,
+    /// Installed font names, filled in by a background thread.
+    fonts: Option<Vec<String>>,
+    font_rx: Receiver<Vec<String>>,
+    font_filter: String,
 }
 
 impl App {
     fn new(ctx: &egui::Context, cfg: Config) -> Self {
         let (jobs, job_rx) = channel::<Job>();
         let (reply_tx, replies) = channel::<Reply>();
+        // Scanning every installed font takes a moment; do it off the UI thread.
+        let (font_tx, font_rx) = channel();
+        let font_ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = font_tx.send(crate::text::font_names());
+            font_ctx.request_repaint();
+        });
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let mut pipeline = Pipeline::default();
@@ -116,7 +127,8 @@ impl App {
                     job = newer;
                 }
                 let t = Instant::now();
-                let result = pipeline.run(&job.input, &job.cfg).map(|o| (o, job.cfg)).map_err(|e| e.to_string());
+                let result =
+                    pipeline.run(job.input.as_deref(), &job.cfg).map(|o| (o, job.cfg)).map_err(|e| e.to_string());
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 if reply_tx.send(Reply { generation: job.generation, result, ms }).is_err() {
                     break;
@@ -151,6 +163,9 @@ impl App {
                 PROBE.with(|p| *p.borrow_mut() = Some(Default::default()));
                 ProbeRun { step: 0, idle_frames: 0 }
             }),
+            fonts: None,
+            font_rx,
+            font_filter: String::new(),
         }
     }
 
@@ -188,11 +203,19 @@ impl App {
     }
 
     fn regenerate(&mut self) {
-        if let Some(input) = &self.input {
-            self.generation += 1;
-            self.busy = true;
-            let _ = self.jobs.send(Job { generation: self.generation, input: input.clone(), cfg: self.cfg.clone() });
+        if self.gcode_file.is_some() {
+            return;
         }
+        if self.input.is_none() && self.cfg.text.iter().all(|t| t.content.trim().is_empty()) {
+            // Nothing left to show.
+            self.shown = None;
+            self.busy = false;
+            self.generation += 1;
+            return;
+        }
+        self.generation += 1;
+        self.busy = true;
+        let _ = self.jobs.send(Job { generation: self.generation, input: self.input.clone(), cfg: self.cfg.clone() });
     }
 
     fn set_shown(&mut self, mut shown: Shown) {
@@ -204,6 +227,9 @@ impl App {
     }
 
     fn poll(&mut self) {
+        if let Ok(fonts) = self.font_rx.try_recv() {
+            self.fonts = Some(fonts);
+        }
         while let Ok(reply) = self.replies.try_recv() {
             if reply.generation != self.generation {
                 continue;
@@ -220,7 +246,7 @@ impl App {
                         toolpaths: out.toolpaths,
                         stats,
                         cfg: Some(cfg),
-                        image: Some(out.image),
+                        image: out.image,
                         ms: reply.ms,
                     });
                 }
@@ -317,7 +343,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "output".into());
+            .unwrap_or_else(|| "text".into());
         let mut d = rfd::FileDialog::new().add_filter("G-code", &["gcode"]).set_file_name(format!("{stem}.gcode"));
         if let Some(dir) = self.input.as_ref().and_then(|p| p.parent()) {
             d = d.set_directory(dir);
@@ -355,7 +381,17 @@ impl App {
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "(none)".into());
-                ui.label(format!("File: {name}"));
+                ui.horizontal(|ui| {
+                    // Button first: the file name's width must not move it.
+                    if probe("remove image", ui.add_enabled(self.input.is_some(), egui::Button::new("Remove")))
+                        .clicked()
+                    {
+                        self.input = None;
+                        c.exclusions.clear();
+                        ch = true;
+                    }
+                    ui.label(format!("File: {name}"));
+                });
                 ui.label(match (size, px) {
                     (Some((w, h)), Some((iw, ih))) => format!("{iw} × {ih} px  ->  {w:.1} × {h:.1} mm"),
                     _ => "Size: -".into(),
@@ -373,6 +409,59 @@ impl App {
                     ch |= num(ui, "Centre Y", &mut c.canvas.center_y, 1.0, -100_000.0..=100_000.0, " mm");
                 });
                 ui.small("The image is scaled to fit inside the canvas, aspect kept.");
+            });
+            section(ui, "Text", true, |ui| {
+                let mut remove = None;
+                for (i, t) in c.text.iter_mut().enumerate() {
+                    let first = t.content.lines().next().unwrap_or("").chars().take(28).collect::<String>();
+                    egui::CollapsingHeader::new(format!("{}. {first}", i + 1))
+                        .id_salt(("text", i))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ch |= ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut t.content)
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .changed();
+                            grid(ui, &format!("text{i}"), |ui| {
+                                ui.label("Font");
+                                ch |= font_picker(ui, i, &mut t.font, self.fonts.as_deref(), &mut self.font_filter);
+                                ui.end_row();
+                                ch |= num(ui, "Size", &mut t.size, 0.5, 0.5..=100_000.0, " mm");
+                                ch |= num(ui, "X (centre)", &mut t.x, 1.0, -100_000.0..=100_000.0, " mm");
+                                ch |= num(ui, "Y (centre)", &mut t.y, 1.0, -100_000.0..=100_000.0, " mm");
+                                ui.label("Style");
+                                ui.horizontal(|ui| {
+                                    ch |= ui.checkbox(&mut t.bold, "Bold").changed();
+                                    ch |= ui.checkbox(&mut t.italic, "Italic").changed();
+                                });
+                                ui.end_row();
+                                ui.label("Infill");
+                                ch |= ui.checkbox(&mut t.infill, "Fill the letters").changed();
+                                ui.end_row();
+                                ch |= int(ui, "Tool", &mut t.tool, 0..=15);
+                            });
+                            if ui.button("Remove text").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                }
+                if let Some(i) = remove {
+                    c.text.remove(i);
+                    ch = true;
+                }
+                if probe("add text", ui.button("Add text")).clicked() {
+                    c.text.push(crate::text::TextItem {
+                        x: c.canvas.center_x,
+                        y: c.canvas.center_y,
+                        size: (c.canvas.height / 8.0).max(1.0),
+                        ..Default::default()
+                    });
+                    ch = true;
+                }
+                ui.small("Any installed font. Text is placed in mm, centred on X/Y; untick Infill for outlines only.");
             });
             section(ui, "Extrusion", true, |ui| {
                 grid(ui, "extrusion", |ui| {
@@ -912,6 +1001,29 @@ fn mm_to_frac(r: [f64; 4], e: [f64; 4]) -> [f64; 4] {
     let (x0, x1) = (fx(r[0]).min(fx(r[2])), fx(r[0]).max(fx(r[2])));
     let (y0, y1) = (fy(r[1]).min(fy(r[3])), fy(r[1]).max(fy(r[3])));
     [x0, y0, x1, y1]
+}
+
+/// A font chooser: every installed family and face, filtered as you type.
+fn font_picker(ui: &mut egui::Ui, id: usize, font: &mut String, fonts: Option<&[String]>, filter: &mut String) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(("font", id)).width(190.0).selected_text(font.as_str()).show_ui(ui, |ui| {
+        ui.add(egui::TextEdit::singleline(filter).hint_text("Search fonts").desired_width(200.0));
+        let Some(fonts) = fonts else {
+            ui.label("Loading fonts...");
+            return;
+        };
+        let f = filter.to_lowercase();
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            let generic = ["sans-serif", "serif", "monospace"].map(String::from);
+            for name in generic.iter().chain(fonts).filter(|n| n.to_lowercase().contains(&f)) {
+                if ui.selectable_label(font == name, name).clicked() {
+                    *font = name.clone();
+                    changed = true;
+                }
+            }
+        });
+    });
+    changed
 }
 
 fn section(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {

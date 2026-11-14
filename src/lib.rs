@@ -4,7 +4,8 @@
 //! use img2gcode::{Config, convert, gcode};
 //! let mut cfg = Config::default();
 //! cfg.canvas.width = 300.0;
-//! let out = convert(std::path::Path::new("logo.png"), &cfg).unwrap();
+//! cfg.text.push(img2gcode::text::TextItem { content: "Hello".into(), y: -300.0, ..Default::default() });
+//! let out = convert(Some(std::path::Path::new("logo.png")), &cfg).unwrap();
 //! std::fs::write("logo.gcode", gcode::write(&out.toolpaths, &cfg, "logo.png")).unwrap();
 //! ```
 #![warn(missing_docs)]
@@ -21,6 +22,7 @@ pub mod pipeline;
 pub mod preview;
 pub mod raster;
 pub mod segment;
+pub mod text;
 pub mod toolpath;
 
 pub use config::{Config, Mode};
@@ -42,6 +44,12 @@ pub enum Error {
     /// The configuration is invalid.
     #[error("config: {0}")]
     Config(String),
+    /// A text item names a font that is not installed.
+    #[error("font not found: {0} (see `img2gcode fonts`)")]
+    Font(String),
+    /// No image and no text.
+    #[error("nothing to convert: give an image or some text")]
+    NothingToDo,
     /// Every pixel counted as background.
     #[error("no foreground pixels: everything is white or transparent (try a higher image.white_threshold)")]
     NoForeground,

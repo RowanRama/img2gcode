@@ -33,6 +33,8 @@ pub struct FillParams {
     pub connect: bool,
     /// Infill exclusion rectangles `[x0, y0, x1, y1]` in pixels.
     pub exclusions: Vec<[f64; 4]>,
+    /// Fill inside the perimeters; `false` gives outlines only.
+    pub infill: bool,
 }
 
 /// One tool's paths for one layer, in image pixels.
@@ -78,6 +80,9 @@ impl ToolField {
                     perimeters.push(to_image(s));
                 }
             }
+        }
+        if !p.infill {
+            return ToolPaths { perimeters, infill: Vec::new() };
         }
         let infill_level = if p.perimeters > 0 {
             (p.inset + p.perimeters as f64 - p.overlap) * p.line_width
@@ -271,6 +276,7 @@ mod tests {
             tolerance: 0.05,
             connect: true,
             exclusions: vec![],
+            infill: true,
         }
     }
 

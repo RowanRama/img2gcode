@@ -25,6 +25,8 @@ pub struct Config {
     pub mode: Mode,
     /// Infill exclusion rectangles `[x0, y0, x1, y1]` in image fractions.
     pub exclusions: Vec<[f64; 4]>,
+    /// Text blocks placed on the canvas.
+    pub text: Vec<crate::text::TextItem>,
     /// Print area and placement.
     pub canvas: Canvas,
     /// Speeds and Z lift.
@@ -158,6 +160,7 @@ impl Default for Config {
         Self {
             mode: Mode::Fill,
             exclusions: Vec::new(),
+            text: Vec::new(),
             canvas: Canvas::default(),
             machine: Machine::default(),
             extrusion: Extrusion::default(),

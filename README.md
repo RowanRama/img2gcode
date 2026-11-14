@@ -87,6 +87,28 @@ segmentation and edge detection are cached, so most changes skip them).
   infill should be left out; right-click one to remove it.
 - Save and load the configuration as TOML; *Export G-code* writes the file.
 
+## Text
+
+Add text in any installed font, on its own or on top of an image. Each text
+item is placed on the canvas in mm (centred on X/Y, independent of the image)
+and printed like a fill-mode region: perimeters, plus infill unless you turn
+it off for outline-only lettering.
+
+- GUI: *Text* > *Add text*, then pick the font (type to search), size,
+  position, bold/italic, infill and tool. Changes preview live.
+- CLI, one item: `--text "Rowan Wuz Here" --font "Arial Black" --text-size 40
+  --text-pos 0,-250` (`--text-outline` for no infill, `--bold`, `--italic`,
+  `--text-tool N`, `\n` for a new line). With no input image the job is just
+  the text.
+- Several items: `[[text]]` blocks in a config file (see `img2gcode config`).
+- `img2gcode fonts [filter]` lists the names you can use: families
+  ("Arial") and the full names of their faces ("Arial Black",
+  "Segoe UI Semibold").
+
+The size is the font size in mm; capital letters are roughly 0.7 of it.
+Outlines follow `layers.perimeter_inset` like everything else: 0.5 keeps the
+printed edge on the letter's edge, 0 traces the outline itself.
+
 ## Configuration
 
 `img2gcode config` prints the default file with every key documented
