@@ -100,6 +100,9 @@ pub struct ImageCfg {
     pub min_area: usize,
     pub resolution: u32,
     pub trim: bool,
+    pub x: f64,
+    pub y: f64,
+    pub scale: f64,
 }
 
 /// Infill settings.
@@ -200,7 +203,7 @@ impl Default for Layers {
 
 impl Default for ImageCfg {
     fn default() -> Self {
-        Self { tools: 2, white_threshold: 220, min_area: 10, resolution: 1200, trim: true }
+        Self { tools: 2, white_threshold: 220, min_area: 10, resolution: 1200, trim: true, x: 0.0, y: 0.0, scale: 1.0 }
     }
 }
 

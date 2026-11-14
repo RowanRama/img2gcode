@@ -27,6 +27,9 @@ pub struct Output {
     pub segmented: Option<Arc<Segmented>>,
     /// The edge map (edge mode only).
     pub edges: Option<Arc<Grid<bool>>>,
+    /// Machine bounds `[xmin, ymin, xmax, ymax]` of each `cfg.text` item
+    /// (`None` for one with nothing to draw).
+    pub text_bounds: Vec<Option<[f64; 4]>>,
     /// Milliseconds per stage, in order.
     pub timings: Vec<(&'static str, f64)>,
 }
@@ -86,11 +89,12 @@ impl Pipeline {
                 image: None,
                 segmented: None,
                 edges: None,
+                text_bounds: Vec::new(),
                 timings: Vec::new(),
             },
             None => return Err(Error::NothingToDo),
         };
-        add_text(&mut out.toolpaths, cfg, input.is_none())?;
+        out.text_bounds = add_text(&mut out.toolpaths, cfg, input.is_none())?;
         timer.lap("text");
         out.timings = timer.laps;
         Ok(out)
@@ -138,8 +142,9 @@ impl Pipeline {
         timer.lap("segment");
 
         let (w, h) = (segmented.labels.w as f64, segmented.labels.h as f64);
-        let scale = (cfg.canvas.width / w).min(cfg.canvas.height / h);
-        let (cx, cy) = (cfg.canvas.center_x, cfg.canvas.center_y);
+        // Fitted to the canvas, then scaled and moved as placed.
+        let scale = (cfg.canvas.width / w).min(cfg.canvas.height / h) * cfg.image.scale.max(1e-6);
+        let (cx, cy) = (cfg.canvas.center_x + cfg.image.x, cfg.canvas.center_y + cfg.image.y);
         let to_mm = |p: Pt| -> Pt { [cx + (p[0] + 0.5 - w / 2.0) * scale, cy + (h / 2.0 - (p[1] + 0.5)) * scale] };
         let lw_px = cfg.line_width() / scale;
         let tol_px = cfg.path.tolerance / scale;
@@ -228,6 +233,7 @@ impl Pipeline {
             image: Some(image),
             segmented: Some(segmented),
             edges: edges_out,
+            text_bounds: Vec::new(),
             timings: Vec::new(),
         })
     }
@@ -244,11 +250,14 @@ fn to_paths(tp: fill::ToolPaths, to_mm: impl Fn(Pt) -> Pt) -> Vec<TPath> {
 /// Add every text item's paths to the job, layer by layer, after whatever
 /// the same tool prints on that layer. With no image, the job's extent
 /// becomes the text's.
-fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<(), Error> {
+fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<Vec<Option<[f64; 4]>>, Error> {
     let layers = cfg.layers.count.max(1);
     let mut bounds: Option<[f64; 4]> = None;
+    let mut each = Vec::with_capacity(cfg.text.len());
     for item in &cfg.text {
-        let Some(mask) = text::render(item, cfg.line_width())? else { continue };
+        let mask = text::render(item, cfg.line_width())?;
+        each.push(mask.as_ref().map(|m| m.bounds));
+        let Some(mask) = mask else { continue };
         let b = mask.bounds;
         bounds = Some(bounds.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
         let params = FillParams {
@@ -286,5 +295,5 @@ fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<(), Err
     if text_only && let Some(b) = bounds {
         tp.extent = b;
     }
-    Ok(())
+    Ok(each)
 }

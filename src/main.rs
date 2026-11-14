@@ -113,6 +113,20 @@ struct ConfigOpts {
     /// Tool that prints --text.
     #[arg(long, default_value_t = 0, value_name = "N", help_heading = "Text")]
     text_tool: usize,
+    /// Wrap --text onto new lines to fit this width in mm.
+    #[arg(long, value_name = "MM", help_heading = "Text")]
+    text_width: Option<f64>,
+    /// How the lines of --text line up.
+    #[arg(long, value_enum, default_value_t = AlignArg::Center, help_heading = "Text")]
+    text_align: AlignArg,
+}
+
+#[derive(Clone, Copy, Default, ValueEnum)]
+enum AlignArg {
+    Left,
+    #[default]
+    Center,
+    Right,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -158,6 +172,12 @@ impl ConfigOpts {
                 italic: self.italic,
                 infill: !self.text_outline,
                 tool: self.text_tool,
+                width: self.text_width.unwrap_or(0.0),
+                align: match self.text_align {
+                    AlignArg::Left => img2gcode::text::Align::Left,
+                    AlignArg::Center => img2gcode::text::Align::Center,
+                    AlignArg::Right => img2gcode::text::Align::Right,
+                },
             });
         }
         Ok(cfg)

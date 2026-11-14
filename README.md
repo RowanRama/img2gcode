@@ -95,9 +95,13 @@ and printed like a fill-mode region: perimeters, plus infill unless you turn
 it off for outline-only lettering.
 
 - GUI: *Text* > *Add text*, then pick the font (type to search), size,
-  position, bold/italic, infill and tool. Changes preview live.
+  position, bold/italic, infill, wrap width, alignment and tool. On the
+  canvas, click text (or the image) to select it: drag to move, drag a
+  corner to resize, drag a side handle to set the wrap width; Delete removes
+  the selected text. Changes preview live.
 - CLI, one item: `--text "Rowan Wuz Here" --font "Arial Black" --text-size 40
   --text-pos 0,-250` (`--text-outline` for no infill, `--bold`, `--italic`,
+  `--text-width MM` to wrap words, `--text-align left|center|right`,
   `--text-tool N`, `\n` for a new line). With no input image the job is just
   the text.
 - Several items: `[[text]]` blocks in a config file (see `img2gcode config`).
@@ -118,7 +122,9 @@ printed edge on the letter's edge, 0 traces the outline itself.
 - `[extrusion]` nozzle, line width, filament, multiplier.
 - `[layers]` count, height, perimeters, `perimeter_inset`.
 - `[image]` `tools`, `white_threshold`, `min_area`, `resolution`, `trim`
-  (crop white margins so the drawing itself fills the canvas).
+  (crop white margins so the drawing itself fills the canvas), and its
+  placement `x`, `y`, `scale`: offset from the canvas centre and size relative
+  to the fitted image (dragging it in the GUI sets these).
 - `[infill]` `density` or `spacing`, `angle`, `connect` (serpentine), `overlap`.
 - `[path]` `smoothing` (px) and `tolerance` (mm): smoother curves vs detail.
 - `[edge]` edge-mode detection and stroke settings.

@@ -53,6 +53,11 @@ resolution = 1200         # images are resampled so their longest side is
                           # this many px before processing
 trim = true               # crop background margins first, so the drawing
                           # itself (not the page around it) fills the canvas
+# Placement: the image is fitted to the canvas, then scaled by `scale` and
+# moved by (x, y) mm from the canvas centre. Dragging it in the GUI sets these.
+x = 0.0
+y = 0.0
+scale = 1.0
 
 [infill]
 density = 100.0           # %; line spacing = line width / (density / 100)
@@ -134,3 +139,5 @@ M84 ; motors off
 # italic = false
 # infill = true                # false = outlines only
 # tool = 0
+# width = 0.0                  # mm; wrap words onto new lines to fit, 0 = off
+# align = "center"             # left, center or right

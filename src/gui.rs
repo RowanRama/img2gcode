@@ -64,7 +64,35 @@ struct Shown {
     segs: Vec<Seg>,
     layers: usize,
     image: Option<Arc<crate::load::Loaded>>,
+    /// Bounds of each text item in the result.
+    text_bounds: Vec<Option<[f64; 4]>>,
     ms: f64,
+}
+
+/// Something on the canvas that can be selected and dragged.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Target {
+    Image,
+    Text(usize),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Handle {
+    /// Scales the item.
+    Corner,
+    /// Sets a text item's wrap width.
+    Side,
+}
+
+/// What a primary-button drag on the canvas is doing.
+#[derive(Clone, Copy)]
+enum Drag {
+    None,
+    Pan,
+    Exclusion { from: [f64; 2] },
+    Move { target: Target, start: [f64; 2], orig: [f64; 2] },
+    Scale { target: Target, centre: [f64; 2], start: f64, orig: f64, orig_width: f64 },
+    Wrap { index: usize, centre_x: f64 },
 }
 
 /// One drawable segment, in print order.
@@ -99,7 +127,8 @@ struct App {
     layer: usize,
     progress: f32,
     draw_exclusions: bool,
-    drag_from: Option<[f64; 2]>,
+    selected: Option<Target>,
+    drag: Drag,
     probe_run: Option<ProbeRun>,
     /// Installed font names, filled in by a background thread.
     fonts: Option<Vec<String>>,
@@ -158,7 +187,8 @@ impl App {
             layer: 0,
             progress: 1.0,
             draw_exclusions: false,
-            drag_from: None,
+            selected: None,
+            drag: Drag::None,
             probe_run: std::env::var_os("IMG2GCODE_LAYOUT_PROBE").map(|_| {
                 PROBE.with(|p| *p.borrow_mut() = Some(Default::default()));
                 ProbeRun { step: 0, idle_frames: 0 }
@@ -194,6 +224,7 @@ impl App {
                     stats,
                     cfg: None,
                     image: None,
+                    text_bounds: Vec::new(),
                     ms: 0.0,
                 });
                 self.fit_pending = true;
@@ -247,6 +278,7 @@ impl App {
                         stats,
                         cfg: Some(cfg),
                         image: out.image,
+                        text_bounds: out.text_bounds,
                         ms: reply.ms,
                     });
                 }
@@ -400,6 +432,16 @@ impl App {
                     ch |= probe("mode fill", ui.radio_value(&mut c.mode, Mode::Fill, "Fill (colours)")).changed();
                     ch |= probe("mode edge", ui.radio_value(&mut c.mode, Mode::Edge, "Edge (strokes)")).changed();
                 });
+                grid(ui, "placement", |ui| {
+                    ch |= num(ui, "Image scale", &mut c.image.scale, 0.01, 0.01..=100.0, "×");
+                    ch |= num(ui, "Image offset X", &mut c.image.x, 1.0, -100_000.0..=100_000.0, " mm");
+                    ch |= num(ui, "Image offset Y", &mut c.image.y, 1.0, -100_000.0..=100_000.0, " mm");
+                });
+                if probe("reset placement", ui.button("Fit image to canvas")).clicked() {
+                    (c.image.x, c.image.y, c.image.scale) = (0.0, 0.0, 1.0);
+                    ch = true;
+                }
+                ui.small("Click the image or text on the canvas to move it; drag a corner to resize.");
             });
             section(ui, "Canvas", true, |ui| {
                 grid(ui, "canvas", |ui| {
@@ -440,6 +482,15 @@ impl App {
                                 ui.end_row();
                                 ui.label("Infill");
                                 ch |= ui.checkbox(&mut t.infill, "Fill the letters").changed();
+                                ui.end_row();
+                                ch |= num(ui, "Wrap width (0 = off)", &mut t.width, 1.0, 0.0..=100_000.0, " mm");
+                                ui.label("Align");
+                                ui.horizontal(|ui| {
+                                    use crate::text::Align;
+                                    ch |= ui.selectable_value(&mut t.align, Align::Left, "Left").changed();
+                                    ch |= ui.selectable_value(&mut t.align, Align::Center, "Centre").changed();
+                                    ch |= ui.selectable_value(&mut t.align, Align::Right, "Right").changed();
+                                });
                                 ui.end_row();
                                 ch |= int(ui, "Tool", &mut t.tool, 0..=15);
                             });
@@ -604,35 +655,73 @@ impl App {
 
     // ----- canvas ----------------------------------------------------------
 
+    /// Where the image sits now: fitted to the canvas, then scaled and moved.
+    /// Follows the settings live, before the toolpaths catch up.
+    fn image_box(&self) -> Option<[f64; 4]> {
+        let s = self.shown.as_ref()?;
+        s.image.as_ref()?;
+        self.input.as_ref()?;
+        let e = s.toolpaths.extent;
+        let aspect = (e[2] - e[0]) / (e[3] - e[1]).max(1e-9);
+        let c = &self.cfg.canvas;
+        let w = c.width.min(c.height * aspect) * self.cfg.image.scale;
+        let h = w / aspect.max(1e-9);
+        let (x, y) = (c.center_x + self.cfg.image.x, c.center_y + self.cfg.image.y);
+        Some([x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0])
+    }
+
+    /// Where text item `i` sits now: its last drawn size, moved and scaled
+    /// with the settings until the next result arrives.
+    fn text_box(&self, i: usize) -> Option<[f64; 4]> {
+        let s = self.shown.as_ref()?;
+        let then = s.cfg.as_ref()?.text.get(i)?;
+        let b = (*s.text_bounds.get(i)?)?;
+        let now = self.cfg.text.get(i)?;
+        let k = now.size / then.size.max(1e-9);
+        let (hw, hh) = ((b[2] - b[0]) / 2.0 * k, (b[3] - b[1]) / 2.0 * k);
+        Some([now.x - hw, now.y - hh, now.x + hw, now.y + hh])
+    }
+
+    fn box_of(&self, t: Target) -> Option<[f64; 4]> {
+        match t {
+            Target::Image => self.image_box(),
+            Target::Text(i) => self.text_box(i),
+        }
+    }
+
+    /// The topmost item under a point: text above the image.
+    fn hit(&self, p: [f64; 2]) -> Option<Target> {
+        let inside = |b: [f64; 4]| p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3];
+        (0..self.cfg.text.len())
+            .rev()
+            .find(|&i| self.text_box(i).is_some_and(inside))
+            .map(Target::Text)
+            .or_else(|| self.image_box().filter(|b| inside(*b)).map(|_| Target::Image))
+    }
+
+    fn position_of(&self, t: Target) -> [f64; 2] {
+        match t {
+            Target::Image => [self.cfg.image.x, self.cfg.image.y],
+            Target::Text(i) => self.cfg.text.get(i).map_or([0.0, 0.0], |t| [t.x, t.y]),
+        }
+    }
+
     fn canvas(&mut self, ui: &mut egui::Ui) -> bool {
         let mut changed = false;
         let (resp, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = resp.rect;
         painter.rect_filled(rect, 0.0, Color32::from_gray(40));
+        let c = &self.cfg.canvas;
+        let canvas_mm = [
+            c.center_x - c.width / 2.0,
+            c.center_y - c.height / 2.0,
+            c.center_x + c.width / 2.0,
+            c.center_y + c.height / 2.0,
+        ];
         let (canvas_rect_mm, extent) = match &self.shown {
-            Some(s) if s.cfg.is_some() => {
-                let c = &self.cfg.canvas;
-                (
-                    [
-                        c.center_x - c.width / 2.0,
-                        c.center_y - c.height / 2.0,
-                        c.center_x + c.width / 2.0,
-                        c.center_y + c.height / 2.0,
-                    ],
-                    s.toolpaths.extent,
-                )
-            }
+            Some(s) if s.cfg.is_some() => (canvas_mm, self.image_box().unwrap_or(s.toolpaths.extent)),
             Some(s) => (s.toolpaths.extent, s.toolpaths.extent),
-            None => {
-                let c = &self.cfg.canvas;
-                let r = [
-                    c.center_x - c.width / 2.0,
-                    c.center_y - c.height / 2.0,
-                    c.center_x + c.width / 2.0,
-                    c.center_y + c.height / 2.0,
-                ];
-                (r, r)
-            }
+            None => (canvas_mm, canvas_mm),
         };
         if self.fit_pending && rect.width() > 10.0 {
             let r = canvas_rect_mm;
@@ -707,8 +796,7 @@ impl App {
         }
 
         for (i, r) in self.cfg.exclusions.iter().enumerate() {
-            let mm = frac_to_mm(*r, extent);
-            let sr = rect_of(mm);
+            let sr = rect_of(frac_to_mm(*r, extent));
             painter.rect_filled(sr, 0.0, Color32::from_rgba_unmultiplied(255, 160, 0, 40));
             painter.rect_stroke(sr, 0.0, Stroke::new(1.5, Color32::from_rgb(230, 140, 0)), StrokeKind::Inside);
             if resp.secondary_clicked()
@@ -721,40 +809,212 @@ impl App {
             }
         }
 
-        // Interaction: draw an exclusion, or pan; scroll zooms at the cursor.
-        let drawing = self.draw_exclusions && self.gcode_file.is_none() && self.cfg.mode == Mode::Fill;
-        if drawing && resp.drag_started_by(egui::PointerButton::Primary) {
-            self.drag_from = resp.interact_pointer_pos().map(to_mm);
+        // ----- selection, moving, resizing --------------------------------
+        let editable = self.gcode_file.is_none();
+        let drawing = self.draw_exclusions && editable && self.cfg.mode == Mode::Fill && self.input.is_some();
+        if matches!(self.selected, Some(Target::Text(i)) if i >= self.cfg.text.len())
+            || (self.selected == Some(Target::Image) && self.input.is_none())
+            || !editable
+        {
+            self.selected = None;
         }
-        if let (true, Some(from)) = (drawing, self.drag_from) {
-            if let Some(p) = resp.interact_pointer_pos() {
-                let to = to_mm(p);
-                painter.rect_stroke(
-                    rect_of([from[0], from[1], to[0], to[1]]),
-                    0.0,
-                    Stroke::new(1.5, Color32::from_rgb(230, 140, 0)),
-                    StrokeKind::Inside,
-                );
-                if resp.drag_stopped() {
-                    let f = mm_to_frac([from[0], from[1], to[0], to[1]], extent);
-                    if (f[2] - f[0]).abs() > 0.002 && (f[3] - f[1]).abs() > 0.002 {
-                        self.cfg.exclusions.push(f);
-                        changed = true;
+        // Handles of the selected item: corners scale, text sides set the wrap width.
+        let handles: Vec<(Handle, Pos2)> = match self.selected.and_then(|t| self.box_of(t).map(|b| (t, b))) {
+            Some((t, b)) => {
+                let r = rect_of(b);
+                let mut v = vec![
+                    (Handle::Corner, r.left_top()),
+                    (Handle::Corner, r.right_top()),
+                    (Handle::Corner, r.left_bottom()),
+                    (Handle::Corner, r.right_bottom()),
+                ];
+                if matches!(t, Target::Text(_)) {
+                    v.push((Handle::Side, r.left_center()));
+                    v.push((Handle::Side, r.right_center()));
+                }
+                v
+            }
+            None => Vec::new(),
+        };
+        let handle_at = |p: Pos2| handles.iter().find(|(_, h)| h.distance(p) <= 9.0).map(|(k, _)| *k);
+
+        // A drag is only reported once the pointer has travelled a little, so
+        // decide what was grabbed from where the button went down.
+        if resp.drag_started_by(egui::PointerButton::Primary)
+            && let Some(p) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+        {
+            let pm = to_mm(p);
+            self.drag = if drawing {
+                Drag::Exclusion { from: pm }
+            } else if let (Some(handle), Some(t)) = (handle_at(p), self.selected) {
+                let b = self.box_of(t).unwrap_or([pm[0], pm[1], pm[0], pm[1]]);
+                let centre = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+                match (handle, t) {
+                    (Handle::Side, Target::Text(index)) => Drag::Wrap { index, centre_x: centre[0] },
+                    _ => {
+                        let (orig, orig_width) = match t {
+                            Target::Image => (self.cfg.image.scale, 0.0),
+                            Target::Text(i) => (self.cfg.text[i].size, self.cfg.text[i].width),
+                        };
+                        let start = (pm[0] - centre[0]).hypot(pm[1] - centre[1]).max(1e-6);
+                        Drag::Scale { target: t, centre, start, orig, orig_width }
                     }
-                    self.drag_from = None;
+                }
+            } else if editable && let Some(t) = self.hit(pm) {
+                self.selected = Some(t);
+                Drag::Move { target: t, start: pm, orig: self.position_of(t) }
+            } else {
+                self.selected = None;
+                Drag::Pan
+            };
+        }
+        if resp.drag_started_by(egui::PointerButton::Middle) || resp.drag_started_by(egui::PointerButton::Secondary) {
+            self.drag = Drag::Pan;
+        }
+        if resp.dragged()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let pm = to_mm(p);
+            match self.drag {
+                Drag::Pan => {
+                    let d = resp.drag_delta();
+                    self.center[0] -= d.x as f64 / zoom;
+                    self.center[1] += d.y as f64 / zoom;
+                }
+                Drag::Move { target, start, orig } => {
+                    let pos = [orig[0] + pm[0] - start[0], orig[1] + pm[1] - start[1]];
+                    match target {
+                        Target::Image => (self.cfg.image.x, self.cfg.image.y) = (pos[0], pos[1]),
+                        Target::Text(i) => (self.cfg.text[i].x, self.cfg.text[i].y) = (pos[0], pos[1]),
+                    }
+                    changed = true;
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                }
+                Drag::Scale { target, centre, start, orig, orig_width } => {
+                    let k = (pm[0] - centre[0]).hypot(pm[1] - centre[1]) / start;
+                    match target {
+                        Target::Image => self.cfg.image.scale = (orig * k).max(0.01),
+                        Target::Text(i) => {
+                            self.cfg.text[i].size = (orig * k).max(0.5);
+                            // A wrapped block keeps its shape as it grows.
+                            self.cfg.text[i].width = orig_width * k;
+                        }
+                    }
+                    changed = true;
+                }
+                Drag::Wrap { index, centre_x } => {
+                    let t = &mut self.cfg.text[index];
+                    t.width = (2.0 * (pm[0] - centre_x).abs()).max(t.size * 0.5);
+                    changed = true;
+                }
+                Drag::Exclusion { from } => {
+                    painter.rect_stroke(
+                        rect_of([from[0], from[1], pm[0], pm[1]]),
+                        0.0,
+                        Stroke::new(1.5, Color32::from_rgb(230, 140, 0)),
+                        StrokeKind::Inside,
+                    );
+                }
+                Drag::None => {}
+            }
+        }
+        if resp.drag_stopped() {
+            if let (Drag::Exclusion { from }, Some(p)) = (self.drag, resp.interact_pointer_pos()) {
+                let to = to_mm(p);
+                let f = mm_to_frac([from[0], from[1], to[0], to[1]], extent);
+                if (f[2] - f[0]).abs() > 0.002 && (f[3] - f[1]).abs() > 0.002 {
+                    self.cfg.exclusions.push(f);
+                    changed = true;
                 }
             }
-            if !resp.dragged() && !resp.drag_stopped() {
-                self.drag_from = None;
-            }
-        } else if resp.dragged() {
-            let d = resp.drag_delta();
-            self.center[0] -= d.x as f64 / zoom;
-            self.center[1] += d.y as f64 / zoom;
+            self.drag = Drag::None;
         }
-        if resp.double_clicked() {
+        if resp.clicked()
+            && !drawing
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            self.selected = if editable { self.hit(to_mm(p)) } else { None };
+        }
+        if resp.double_clicked() && self.selected.is_none() {
             self.fit_pending = true;
         }
+        // Delete removes the selected text, unless a text field is being edited.
+        if let Some(Target::Text(i)) = self.selected
+            && ui.input(|inp| inp.key_pressed(egui::Key::Delete))
+            && ui.ctx().memory(|m| m.focused().is_none())
+        {
+            self.cfg.text.remove(i);
+            self.selected = None;
+            changed = true;
+        }
+
+        // Hover feedback and the selection box.
+        let accent = Color32::from_rgb(40, 130, 255);
+        if let Some(hover) = resp.hover_pos()
+            && !drawing
+            && matches!(self.drag, Drag::None)
+        {
+            match handle_at(hover) {
+                Some(Handle::Corner) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe),
+                Some(Handle::Side) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
+                None => {
+                    if editable && let Some(t) = self.hit(to_mm(hover)) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        if Some(t) != self.selected
+                            && let Some(b) = self.box_of(t)
+                        {
+                            painter.rect_stroke(
+                                rect_of(b),
+                                0.0,
+                                Stroke::new(1.0, accent.gamma_multiply(0.6)),
+                                StrokeKind::Outside,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(t) = self.selected
+            && let Some(b) = self.box_of(t)
+        {
+            painter.rect_stroke(rect_of(b), 0.0, Stroke::new(1.5, accent), StrokeKind::Outside);
+            if let Target::Text(i) = t
+                && self.cfg.text[i].width > 0.0
+            {
+                // The wrap width, centred on the text.
+                let hw = self.cfg.text[i].width / 2.0;
+                let x = self.cfg.text[i].x;
+                let wr = rect_of([x - hw, b[1], x + hw, b[3]]);
+                let faint = Stroke::new(1.0, accent.gamma_multiply(0.5));
+                painter.line_segment([wr.left_top(), wr.left_bottom()], faint);
+                painter.line_segment([wr.right_top(), wr.right_bottom()], faint);
+            }
+            for (kind, pos) in &handles {
+                match kind {
+                    Handle::Corner => {
+                        let r = Rect::from_center_size(*pos, Vec2::splat(9.0));
+                        painter.rect_filled(r, 1.0, Color32::WHITE);
+                        painter.rect_stroke(r, 1.0, Stroke::new(1.5, accent), StrokeKind::Inside);
+                    }
+                    Handle::Side => {
+                        painter.circle_filled(*pos, 5.0, Color32::WHITE);
+                        painter.circle_stroke(*pos, 5.0, Stroke::new(1.5, accent));
+                    }
+                }
+            }
+            let hint = match t {
+                Target::Image => "Drag to move · corners resize",
+                Target::Text(_) => "Drag to move · corners resize · sides set the wrap width · Delete removes",
+            };
+            painter.text(
+                rect.left_top() + Vec2::new(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                hint,
+                egui::FontId::proportional(13.0),
+                Color32::from_gray(210),
+            );
+        }
+
         if let Some(hover) = resp.hover_pos() {
             let scroll = ui.input(|i| i.smooth_scroll_delta().y);
             let pinch = ui.input(|i| i.zoom_delta());
@@ -1006,23 +1266,29 @@ fn mm_to_frac(r: [f64; 4], e: [f64; 4]) -> [f64; 4] {
 /// A font chooser: every installed family and face, filtered as you type.
 fn font_picker(ui: &mut egui::Ui, id: usize, font: &mut String, fonts: Option<&[String]>, filter: &mut String) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt(("font", id)).width(190.0).selected_text(font.as_str()).show_ui(ui, |ui| {
-        ui.add(egui::TextEdit::singleline(filter).hint_text("Search fonts").desired_width(200.0));
-        let Some(fonts) = fonts else {
-            ui.label("Loading fonts...");
-            return;
-        };
-        let f = filter.to_lowercase();
-        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            let generic = ["sans-serif", "serif", "monospace"].map(String::from);
-            for name in generic.iter().chain(fonts).filter(|n| n.to_lowercase().contains(&f)) {
-                if ui.selectable_label(font == name, name).clicked() {
-                    *font = name.clone();
-                    changed = true;
+    egui::ComboBox::from_id_salt(("font", id))
+        .width(190.0)
+        .selected_text(font.as_str())
+        // Clicking into the search box must not close the list.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            ui.add(egui::TextEdit::singleline(filter).hint_text("Search fonts").desired_width(200.0));
+            let Some(fonts) = fonts else {
+                ui.label("Loading fonts...");
+                return;
+            };
+            let f = filter.to_lowercase();
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                let generic = ["sans-serif", "serif", "monospace"].map(String::from);
+                for name in generic.iter().chain(fonts).filter(|n| n.to_lowercase().contains(&f)) {
+                    if ui.selectable_label(font == name, name).clicked() {
+                        *font = name.clone();
+                        changed = true;
+                        ui.close();
+                    }
                 }
-            }
+            });
         });
-    });
     changed
 }
 
@@ -1079,6 +1345,140 @@ fn int_u8(ui: &mut egui::Ui, label: &str, v: &mut u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SCREEN: Vec2 = Vec2::new(1000.0, 800.0);
+
+    /// One frame of the canvas alone, with these input events.
+    fn frame(ctx: &egui::Context, app: &mut App, events: Vec<egui::Event>) {
+        let raw =
+            egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, SCREEN)), events, ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| {
+            app.poll();
+            if app.canvas(ui) {
+                app.regenerate();
+            }
+        });
+        // No renderer here to upload textures to.
+        out.textures_delta.clear();
+    }
+
+    /// Run frames until the worker's result is in.
+    fn settle(ctx: &egui::Context, app: &mut App) {
+        for _ in 0..500 {
+            frame(ctx, app, vec![]);
+            if app.shown.is_some() && !app.busy {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no result: {:?}", app.error);
+    }
+
+    fn screen(app: &App, p: [f64; 2]) -> Pos2 {
+        let mid = (SCREEN / 2.0).to_pos2();
+        let z = app.zoom as f64;
+        Pos2::new(mid.x + ((p[0] - app.center[0]) * z) as f32, mid.y - ((p[1] - app.center[1]) * z) as f32)
+    }
+
+    /// Press at `from`, move to `to` in steps, release.
+    fn drag(ctx: &egui::Context, app: &mut App, from: Pos2, to: Pos2) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(ctx, app, vec![egui::Event::PointerMoved(from)]);
+        frame(ctx, app, vec![button(from, true)]);
+        for k in 1..=10 {
+            let p = from + (to - from) * (k as f32 / 10.0);
+            frame(ctx, app, vec![egui::Event::PointerMoved(p)]);
+        }
+        frame(ctx, app, vec![button(to, false)]);
+        frame(ctx, app, vec![]);
+    }
+
+    #[test]
+    fn text_on_the_canvas_can_be_moved_and_resized() {
+        let ctx = egui::Context::default();
+        let mut cfg = Config::default();
+        cfg.text.push(crate::text::TextItem { content: "HHHH".into(), size: 100.0, ..Default::default() });
+        let mut app = App::new(&ctx, cfg);
+        app.regenerate();
+        settle(&ctx, &mut app);
+        let b = app.text_box(0).expect("text has a box");
+
+        // Drag from the middle of the text: it follows the pointer.
+        let start = screen(&app, [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]);
+        drag(&ctx, &mut app, start, start + Vec2::new(80.0, -40.0));
+        assert_eq!(app.selected, Some(Target::Text(0)));
+        let t = &app.cfg.text[0];
+        let z = app.zoom as f64;
+        assert!((t.x * z - 80.0).abs() < 12.0, "moved {} px right", t.x * z);
+        assert!((t.y * z - 40.0).abs() < 12.0, "moved {} px up", t.y * z);
+        settle(&ctx, &mut app);
+
+        // Drag a corner outwards: the text grows.
+        let b = app.text_box(0).unwrap();
+        let corner = screen(&app, [b[2], b[3]]);
+        drag(&ctx, &mut app, corner, corner + Vec2::new(60.0, -30.0));
+        assert!(app.cfg.text[0].size > 110.0, "size {}", app.cfg.text[0].size);
+        settle(&ctx, &mut app);
+
+        // A side handle sets the wrap width.
+        let b = app.text_box(0).unwrap();
+        let side = screen(&app, [b[2], (b[1] + b[3]) / 2.0]);
+        let x_before = app.cfg.text[0].x;
+        drag(&ctx, &mut app, side, side - Vec2::new(150.0, 0.0));
+        let t = &app.cfg.text[0];
+        assert_eq!(t.x, x_before, "a side handle must not move the text");
+        assert!(t.width > 0.0 && t.width < b[2] - b[0], "wrap width {}", t.width);
+
+        // Pressing on empty canvas lets go of the selection.
+        drag(&ctx, &mut app, Pos2::new(5.0, 5.0), Pos2::new(40.0, 40.0));
+        assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn the_image_can_be_moved_and_resized_on_the_canvas() {
+        let dir = std::env::temp_dir().join(format!("img2gcode-gui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("square.png");
+        let mut img = image::RgbaImage::from_pixel(200, 100, image::Rgba([255, 255, 255, 255]));
+        for y in 20..80 {
+            for x in 20..180 {
+                img.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        img.save(&path).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::new(&ctx, Config::default());
+        app.open_image(path);
+        settle(&ctx, &mut app);
+        // The image fills the canvas width; zoom out so its corners are on screen.
+        app.zoom *= 0.6;
+        let b = app.image_box().expect("image has a box");
+
+        let start = screen(&app, [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]);
+        drag(&ctx, &mut app, start, start + Vec2::new(-50.0, 30.0));
+        assert_eq!(app.selected, Some(Target::Image));
+        let z = app.zoom as f64;
+        assert!((app.cfg.image.x * z + 50.0).abs() < 2.0, "moved {} px", app.cfg.image.x * z);
+        assert!((app.cfg.image.y * z + 30.0).abs() < 2.0, "moved {} px", app.cfg.image.y * z);
+        settle(&ctx, &mut app);
+
+        // Drag a corner inwards: the image shrinks, keeping its aspect.
+        let b = app.image_box().unwrap();
+        let corner = screen(&app, [b[0], b[3]]);
+        let centre = screen(&app, [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]);
+        drag(&ctx, &mut app, corner, corner + (centre - corner) * 0.5);
+        assert!((app.cfg.image.scale - 0.5).abs() < 0.05, "scale {}", app.cfg.image.scale);
+        settle(&ctx, &mut app);
+        let e = app.shown.as_ref().unwrap().toolpaths.extent;
+        let nb = app.image_box().unwrap();
+        assert!((e[2] - e[0] - (nb[2] - nb[0])).abs() < 1.0, "drawn width matches the box");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn exclusion_fractions_roundtrip_through_mm() {

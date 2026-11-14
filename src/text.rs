@@ -37,6 +37,22 @@ pub struct TextItem {
     pub infill: bool,
     /// Tool that prints the text.
     pub tool: usize,
+    /// Wrap words onto new lines to fit this width (mm); 0 = no wrapping.
+    pub width: f64,
+    /// How lines line up with each other.
+    pub align: Align,
+}
+
+/// Line alignment within a text block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Align {
+    /// Lines start at the same x.
+    Left,
+    /// Lines are centred on each other.
+    Center,
+    /// Lines end at the same x.
+    Right,
 }
 
 impl Default for TextItem {
@@ -51,6 +67,8 @@ impl Default for TextItem {
             italic: false,
             infill: true,
             tool: 0,
+            width: 0.0,
+            align: Align::Center,
         }
     }
 }
@@ -189,6 +207,59 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// Advance widths (mm) of each string set in `style`, measured in one layout.
+fn measure(strings: &[&str], style: &str, opt: &usvg::Options) -> Result<Vec<f64>, Error> {
+    let mut svg = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">"#);
+    for (i, s) in strings.iter().enumerate() {
+        svg.push_str(&format!(r#"<text y="{}" {style}>{}</text>"#, i * 1000, escape(s)));
+    }
+    svg.push_str("</svg>");
+    let tree = usvg::Tree::from_str(&svg, opt).map_err(|e| Error::Svg(e.to_string()))?;
+    Ok(tree
+        .root()
+        .children()
+        .iter()
+        .filter_map(|n| if let usvg::Node::Text(t) = n { Some(t.bounding_box().width() as f64) } else { None })
+        .collect())
+}
+
+/// Break `content` into lines no wider than `width` (mm), at spaces. A word
+/// wider than the box gets a line of its own. `\n` still forces a break.
+fn wrap(content: &str, width: f64, style: &str, opt: &usvg::Options) -> Result<Vec<String>, Error> {
+    let mut words: Vec<&str> = content.split_whitespace().collect();
+    words.sort_unstable();
+    words.dedup();
+    // A space's width is what it adds between two letters.
+    let mut probe = words.clone();
+    probe.extend(["x x", "xx"]);
+    let widths = measure(&probe, style, opt)?;
+    if widths.len() != probe.len() {
+        // Some string drew nothing, so the widths cannot be matched up.
+        return Ok(content.lines().map(String::from).collect());
+    }
+    let space = (widths[widths.len() - 2] - widths[widths.len() - 1]).max(0.0);
+    let width_of = |w: &str| words.binary_search(&w).map_or(0.0, |i| widths[i]);
+    let mut lines = Vec::new();
+    for para in content.lines() {
+        let (mut line, mut used) = (String::new(), 0.0);
+        for word in para.split_whitespace() {
+            let w = width_of(word);
+            if line.is_empty() {
+                (line, used) = (word.to_string(), w);
+            } else if used + space + w <= width {
+                line.push(' ');
+                line.push_str(word);
+                used += space + w;
+            } else {
+                lines.push(std::mem::replace(&mut line, word.to_string()));
+                used = w;
+            }
+        }
+        lines.push(line);
+    }
+    Ok(lines)
+}
+
 /// Lay out and draw `item`. `None` when it has no visible glyphs.
 /// `line_width` (mm) sets how finely it is drawn: at least 6 px per line.
 pub fn render(item: &TextItem, line_width: f64) -> Result<Option<TextMask>, Error> {
@@ -201,22 +272,35 @@ pub fn render(item: &TextItem, line_width: f64) -> Result<Option<TextMask>, Erro
         Some((w, i)) => (w, i || item.italic),
         None => (if item.bold { 700 } else { 400 }, item.italic),
     };
-    // One SVG unit = 1 mm. Lines are centred under each other.
-    let mut spans = String::new();
-    for (i, line) in item.content.lines().enumerate() {
-        let dy = if i == 0 { "0" } else { "1.2em" };
-        // An empty line still takes its height.
-        let text = if line.is_empty() { "\u{a0}" } else { line };
-        spans.push_str(&format!(r#"<tspan x="0" dy="{dy}">{}</tspan>"#, escape(text)));
-    }
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><text font-family="{}" font-size="{}" font-weight="{}" font-style="{}" text-anchor="middle" fill="#000">{spans}</text></svg>"##,
+    // One SVG unit = 1 mm.
+    let style = format!(
+        r#"font-family="{}" font-size="{}" font-weight="{}" font-style="{}""#,
         escape(&family),
         item.size,
         weight,
         if italic { "italic" } else { "normal" },
     );
     let opt = usvg::Options { fontdb: fonts, ..Default::default() };
+    let lines = if item.width > 0.0 {
+        wrap(&item.content, item.width, &style, &opt)?
+    } else {
+        item.content.lines().map(String::from).collect()
+    };
+    let mut spans = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        let dy = if i == 0 { "0" } else { "1.2em" };
+        // An empty line still takes its height.
+        let text = if line.is_empty() { "\u{a0}" } else { line };
+        spans.push_str(&format!(r#"<tspan x="0" dy="{dy}">{}</tspan>"#, escape(text)));
+    }
+    let anchor = match item.align {
+        Align::Left => "start",
+        Align::Center => "middle",
+        Align::Right => "end",
+    };
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><text {style} text-anchor="{anchor}" fill="#000">{spans}</text></svg>"##
+    );
     let tree = usvg::Tree::from_str(&svg, &opt).map_err(|e| Error::Svg(e.to_string()))?;
     // The layout box (line height, advance widths), not the ink: glyphs can
     // overhang it, so draw a margin around it and measure the ink after.
@@ -329,6 +413,28 @@ mod tests {
         let black = render(&TextItem { content: "H".into(), font: "Arial Black".into(), ..Default::default() }, 1.0);
         let ink = |m: TextMask| m.labels.data.iter().filter(|&&l| l == 0).count() as f64 / (m.ppm * m.ppm);
         assert!(ink(black.unwrap().unwrap()) > 1.3 * ink(regular.unwrap().unwrap()));
+    }
+
+    #[test]
+    fn wrapping_keeps_lines_inside_the_width() {
+        let Some(font) = some_font() else { return };
+        let content = "one two three four five six seven eight nine ten".to_string();
+        let one_line = render(&TextItem { content: content.clone(), font: font.clone(), ..Default::default() }, 1.0)
+            .unwrap()
+            .unwrap();
+        let wrapped = render(&TextItem { content, font, width: 200.0, ..Default::default() }, 1.0).unwrap().unwrap();
+        let w = |m: &TextMask| m.bounds[2] - m.bounds[0];
+        let h = |m: &TextMask| m.bounds[3] - m.bounds[1];
+        assert!(w(&one_line) > 400.0);
+        assert!(w(&wrapped) <= 200.0 + 1.0, "wrapped width {}", w(&wrapped));
+        assert!(h(&wrapped) > 2.5 * h(&one_line), "only {} high", h(&wrapped));
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_keeps_its_own_line() {
+        let opt = usvg::Options { fontdb: system_fonts(), ..Default::default() };
+        let lines = wrap("a extraordinarily b", 5.0, r#"font-family="sans-serif" font-size="10""#, &opt).unwrap();
+        assert_eq!(lines, vec!["a", "extraordinarily", "b"]);
     }
 
     #[test]
