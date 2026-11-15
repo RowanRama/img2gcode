@@ -8,13 +8,13 @@ use std::time::{Instant, SystemTime};
 use crate::config::{Config, Mode};
 use crate::edge::{self, DetectParams, TraceParams};
 use crate::fill::{self, FillParams};
-use crate::geom::Pt;
+use crate::geom::{self, Pt};
 use crate::load::{self, Loaded};
 use crate::raster::Grid;
 use crate::segment::{self, Segmented};
-use crate::text;
 use crate::toolpath::{Pass, Path as TPath, PathKind, Toolpaths};
 use crate::{Error, default_tool_colors};
+use crate::{stroke_font, text};
 
 /// The result of one run.
 #[derive(Debug, Clone)]
@@ -255,6 +255,19 @@ fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<Vec<Opt
     let mut bounds: Option<[f64; 4]> = None;
     let mut each = Vec::with_capacity(cfg.text.len());
     for item in &cfg.text {
+        if let Some(font) = stroke_font::find(&item.font)? {
+            let laid = font.layout(item);
+            each.push(laid.as_ref().map(|l| l.1));
+            let Some((strokes, b)) = laid else { continue };
+            bounds = Some(bounds.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
+            let strokes: Vec<Vec<Pt>> = strokes.iter().map(|s| geom::simplify(s, cfg.path.tolerance)).collect();
+            let paths: Vec<TPath> =
+                geom::order(strokes, None).into_iter().map(|points| TPath { kind: PathKind::Stroke, points }).collect();
+            for l in 0..layers {
+                push_paths(tp, cfg, l, item.tool, paths.clone());
+            }
+            continue;
+        }
         let mask = text::render(item, cfg.line_width())?;
         each.push(mask.as_ref().map(|m| m.bounds));
         let Some(mask) = mask else { continue };
@@ -275,20 +288,7 @@ fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<Vec<Opt
         };
         let per_layer = fill::build(&mask.labels, 1, layers, cfg.infill.angle, &params);
         for (l, mut per_tool) in per_layer.into_iter().enumerate() {
-            let paths = to_paths(per_tool.swap_remove(0), |p| mask.to_mm(p));
-            if paths.is_empty() {
-                continue;
-            }
-            match tp.passes.iter_mut().find(|p| p.layer == l && p.tool == item.tool) {
-                Some(pass) => pass.paths.extend(paths),
-                None => {
-                    tp.passes.push(Pass { layer: l, tool: item.tool, z: cfg.layers.height * (l + 1) as f64, paths })
-                }
-            }
-        }
-        if tp.tool_colors.len() <= item.tool {
-            let extra = default_tool_colors(item.tool + 1);
-            tp.tool_colors.extend_from_slice(&extra[tp.tool_colors.len()..]);
+            push_paths(tp, cfg, l, item.tool, to_paths(per_tool.swap_remove(0), |p| mask.to_mm(p)));
         }
     }
     tp.passes.sort_by_key(|p| (p.layer, p.tool));
@@ -296,4 +296,47 @@ fn add_text(tp: &mut Toolpaths, cfg: &Config, text_only: bool) -> Result<Vec<Opt
         tp.extent = b;
     }
     Ok(each)
+}
+
+/// Add `paths` to the pass for (`layer`, `tool`), making it if needed.
+fn push_paths(tp: &mut Toolpaths, cfg: &Config, layer: usize, tool: usize, paths: Vec<TPath>) {
+    if paths.is_empty() {
+        return;
+    }
+    match tp.passes.iter_mut().find(|p| p.layer == layer && p.tool == tool) {
+        Some(pass) => pass.paths.extend(paths),
+        None => tp.passes.push(Pass { layer, tool, z: cfg.layers.height * (layer + 1) as f64, paths }),
+    }
+    if tp.tool_colors.len() <= tool {
+        let extra = default_tool_colors(tool + 1);
+        tp.tool_colors.extend_from_slice(&extra[tp.tool_colors.len()..]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::TextItem;
+
+    #[test]
+    fn single_line_text_prints_strokes_on_every_layer() {
+        let mut cfg = Config::default();
+        cfg.layers.count = 2;
+        cfg.text = vec![TextItem {
+            content: "Hi".into(),
+            font: crate::stroke_font::RELIEF.into(),
+            tool: 1,
+            ..TextItem::default()
+        }];
+        let out = Pipeline::default().run(None, &cfg).unwrap();
+        let passes = &out.toolpaths.passes;
+        assert_eq!(passes.iter().map(|p| (p.layer, p.tool)).collect::<Vec<_>>(), vec![(0, 1), (1, 1)]);
+        assert!(passes.iter().flat_map(|p| &p.paths).all(|p| p.kind == PathKind::Stroke));
+        // H is three strokes; Relief's i is its stem and dot plus a 2-unit
+        // cap mark on each.
+        assert_eq!(passes[0].paths.len(), 7);
+        assert_eq!(out.text_bounds.len(), 1);
+        assert_eq!(out.toolpaths.extent, out.text_bounds[0].unwrap());
+        assert_eq!(out.toolpaths.tool_colors.len(), 2);
+    }
 }

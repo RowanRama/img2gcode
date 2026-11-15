@@ -1,11 +1,12 @@
-[package]
+﻿[package]
 name = "img2gcode"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Convert images, photos and SVGs into smooth multi-tool G-code, with a live-preview GUI"
 license = "MIT"
 repository = "https://github.com/RowanRama/img2gcode"
+default-run = "img2gcode"
 
 [[bin]]
 name = "img2gcode"
@@ -31,7 +32,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rayon = "1.10"
 resvg = { version = "0.50", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 rfd = { version = "0.18", optional = true }
+roxmltree = "0.20"
 serde = { version = "1", features = ["derive"] }
+svgtypes = "0.16"
 thiserror = "2"
 toml = "0.9"
 
@@ -67,4 +70,5 @@ assets = [
     ["assets/icon.png", "usr/share/icons/hicolor/256x256/apps/img2gcode.png", "644"],
     ["configs/default.toml", "usr/share/doc/img2gcode/default.toml", "644"],
     ["README.md", "usr/share/doc/img2gcode/README.md", "644"],
+    ["fonts/ReliefSingleLine-OFL.txt", "usr/share/doc/img2gcode/ReliefSingleLine-OFL.txt", "644"],
 ]

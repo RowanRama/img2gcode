@@ -105,9 +105,29 @@ it off for outline-only lettering.
   `--text-tool N`, `\n` for a new line). With no input image the job is just
   the text.
 - Several items: `[[text]]` blocks in a config file (see `img2gcode config`).
-- `img2gcode fonts [filter]` lists the names you can use: families
-  ("Arial") and the full names of their faces ("Arial Black",
-  "Segoe UI Semibold").
+- `img2gcode fonts [filter]` lists the names you can use: single-line fonts
+  first, then families ("Arial") and the full names of their faces
+  ("Arial Black", "Segoe UI Semibold").
+
+### Single-line fonts
+
+A single-line (stroke) font draws each letter as a few open strokes that the
+tool follows once, instead of an outline to fill: much faster, and the
+natural choice for pen plotters, engraving and laser cutting.
+
+- **Relief SingleLine** is built in: pick it in the font list (marked
+  *single-line*) or `--font "Relief SingleLine"`.
+- Any SVG font works too, the format Inkscape's Hershey Text uses. The
+  Hershey fonts of an Inkscape install are listed automatically; for others,
+  give the file's path as the font: `--font ~/fonts/EMSReadability.svg`.
+- Size, position, italic, wrapping, alignment and tool work as usual. Bold
+  and infill do not apply; the stroke is one line width wide.
+
+Relief SingleLine is by Élisa Garzelli, Noëlie Dayma and François Chastanet
+(isdaT), from [isdat-type/Relief-SingleLine](https://github.com/isdat-type/Relief-SingleLine),
+under the SIL Open Font License ([fonts/ReliefSingleLine-OFL.txt](fonts/ReliefSingleLine-OFL.txt)).
+
+### Size and outlines
 
 The size is the font size in mm; capital letters are roughly 0.7 of it.
 Outlines follow `layers.perimeter_inset` like everything else: 0.5 keeps the
@@ -155,4 +175,5 @@ changes and an error, then reports any control whose position changed.
 
 ## License
 
-MIT
+MIT. The bundled Relief SingleLine font is under the SIL Open Font License
+1.1 (`fonts/ReliefSingleLine-OFL.txt`).

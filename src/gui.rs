@@ -474,14 +474,23 @@ impl App {
                                 ch |= num(ui, "Size", &mut t.size, 0.5, 0.5..=100_000.0, " mm");
                                 ch |= num(ui, "X (centre)", &mut t.x, 1.0, -100_000.0..=100_000.0, " mm");
                                 ch |= num(ui, "Y (centre)", &mut t.y, 1.0, -100_000.0..=100_000.0, " mm");
+                                // Single-line letters are strokes: nothing to embolden or fill.
+                                let outline = !crate::stroke_font::is_stroke(&t.font);
+                                let why = "A single-line font draws each stroke once";
                                 ui.label("Style");
                                 ui.horizontal(|ui| {
-                                    ch |= ui.checkbox(&mut t.bold, "Bold").changed();
+                                    ch |= ui
+                                        .add_enabled(outline, egui::Checkbox::new(&mut t.bold, "Bold"))
+                                        .on_disabled_hover_text(why)
+                                        .changed();
                                     ch |= ui.checkbox(&mut t.italic, "Italic").changed();
                                 });
                                 ui.end_row();
                                 ui.label("Infill");
-                                ch |= ui.checkbox(&mut t.infill, "Fill the letters").changed();
+                                ch |= ui
+                                    .add_enabled(outline, egui::Checkbox::new(&mut t.infill, "Fill the letters"))
+                                    .on_disabled_hover_text(why)
+                                    .changed();
                                 ui.end_row();
                                 ch |= num(ui, "Wrap width (0 = off)", &mut t.width, 1.0, 0.0..=100_000.0, " mm");
                                 ui.label("Align");
@@ -1281,7 +1290,12 @@ fn font_picker(ui: &mut egui::Ui, id: usize, font: &mut String, fonts: Option<&[
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 let generic = ["sans-serif", "serif", "monospace"].map(String::from);
                 for name in generic.iter().chain(fonts).filter(|n| n.to_lowercase().contains(&f)) {
-                    if ui.selectable_label(font == name, name).clicked() {
+                    let label = if crate::stroke_font::is_stroke(name) {
+                        format!("{name}  (single-line)")
+                    } else {
+                        name.clone()
+                    };
+                    if ui.selectable_label(font == name, label).clicked() {
                         *font = name.clone();
                         changed = true;
                         ui.close();

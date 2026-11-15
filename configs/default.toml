@@ -127,11 +127,13 @@ M84 ; motors off
 
 # Text from any installed font (`img2gcode fonts` lists them), placed on the
 # canvas in mm, independently of the image. Repeat the block for more text.
-# With no image at all, the job is just the text.
+# With no image at all, the job is just the text. A single-line font
+# ("Relief SingleLine", built in, or an SVG font file's path) draws each
+# letter as strokes followed once; bold and infill do not apply to it.
 #
 # [[text]]
 # content = "Rowan Wuz Here"   # "\n" starts a new line
-# font = "Arial Black"         # family name, or sans-serif / serif / monospace
+# font = "Arial Black"         # family or face name, sans-serif / serif / monospace, or a single-line font
 # size = 40.0                  # mm, the font size (capitals are ~0.7 of it)
 # x = 0.0                      # mm, centre of the text block
 # y = -250.0

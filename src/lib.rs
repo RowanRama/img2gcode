@@ -22,6 +22,7 @@ pub mod pipeline;
 pub mod preview;
 pub mod raster;
 pub mod segment;
+pub mod stroke_font;
 pub mod text;
 pub mod toolpath;
 

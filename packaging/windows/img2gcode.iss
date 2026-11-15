@@ -42,6 +42,7 @@ Source: "{#Root}\target\release\img2gcode-gui.exe"; DestDir: "{app}"; Flags: ign
 Source: "{#Root}\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\configs\default.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\fonts\ReliefSingleLine-OFL.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\img2gcode"; Filename: "{app}\img2gcode-gui.exe"; IconFilename: "{app}\icon.ico"

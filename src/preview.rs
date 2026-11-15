@@ -8,7 +8,11 @@ use crate::toolpath::{PathKind, Toolpaths};
 /// Draw `tp` with lines `line_width` mm wide; the longer side of the
 /// drawing is `size` px. Travel moves are thin grey lines when `travel`.
 pub fn render(tp: &Toolpaths, line_width: f64, size: u32, travel: bool) -> RgbaImage {
-    let e = tp.extent;
+    // The image's extent, grown to take in text placed outside it.
+    let mut e = tp.extent;
+    for p in tp.passes.iter().flat_map(|p| &p.paths).flat_map(|p| &p.points) {
+        e = [e[0].min(p[0]), e[1].min(p[1]), e[2].max(p[0]), e[3].max(p[1])];
+    }
     let margin = line_width;
     let (w_mm, h_mm) = (e[2] - e[0] + 2.0 * margin, e[3] - e[1] + 2.0 * margin);
     let s = size as f64 / w_mm.max(h_mm).max(1e-6);

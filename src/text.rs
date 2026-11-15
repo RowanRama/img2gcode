@@ -21,6 +21,8 @@ pub struct TextItem {
     pub content: String,
     /// A font family ("Arial") or a face's full name ("Arial Black"), as
     /// `img2gcode fonts` lists them, or `sans-serif`, `serif`, `monospace`.
+    /// A single-line font ("Relief SingleLine", or an SVG font file's path)
+    /// draws each stroke once; `bold` and `infill` do not apply to it.
     pub font: String,
     /// Font size in mm (the em size; capitals are about 0.7 of it). The
     /// text is centred on its letters, not on its line box.
@@ -129,15 +131,18 @@ fn faces() -> &'static [Face] {
     })
 }
 
-/// Every name text can use: font families ("Arial") and the full names of
-/// their faces ("Arial Black", "Arial Bold Italic"), sorted.
+/// Every name text can use: the single-line fonts first, then font
+/// families ("Arial") and the full names of their faces ("Arial Black",
+/// "Arial Bold Italic"), sorted.
 pub fn font_names() -> Vec<String> {
     let db = system_fonts();
     let mut v: Vec<String> = db.faces().flat_map(|f| f.families.iter().map(|(n, _)| n.clone())).collect();
     v.extend(faces().iter().map(|f| f.name.clone()));
     v.sort_by_key(|s| s.to_lowercase());
     v.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-    v
+    let mut all = crate::stroke_font::names();
+    all.extend(v);
+    all
 }
 
 const GENERIC: [&str; 5] = ["sans-serif", "serif", "monospace", "cursive", "fantasy"];

@@ -30,7 +30,7 @@ jobs:
           $v = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
           $name = "img2gcode-$v-windows-x64-portable"
           New-Item -ItemType Directory -Force "dist/$name" | Out-Null
-          Copy-Item target/release/img2gcode.exe, target/release/img2gcode-gui.exe, README.md, configs/default.toml "dist/$name/"
+          Copy-Item target/release/img2gcode.exe, target/release/img2gcode-gui.exe, README.md, configs/default.toml, fonts/ReliefSingleLine-OFL.txt "dist/$name/"
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           Remove-Item -Recurse "dist/$name"
           # Inno Setup 6 or 7, wherever the runner (or choco) put it.
@@ -60,7 +60,7 @@ jobs:
           v=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           name="img2gcode-$v-linux-x86_64"
           mkdir -p "dist/$name"
-          cp target/release/img2gcode packaging/linux/install.sh packaging/linux/img2gcode.desktop README.md configs/default.toml "dist/$name/"
+          cp target/release/img2gcode packaging/linux/install.sh packaging/linux/img2gcode.desktop README.md configs/default.toml fonts/ReliefSingleLine-OFL.txt "dist/$name/"
           cp assets/icon.png "dist/$name/img2gcode.png"
           chmod +x "dist/$name/img2gcode" "dist/$name/install.sh"
           tar -C dist -czf "dist/$name.tar.gz" "$name"

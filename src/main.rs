@@ -214,8 +214,12 @@ fn main() -> ExitCode {
         }
         Some(Cmd::Fonts { filter }) => {
             let f = filter.unwrap_or_default().to_lowercase();
-            for family in img2gcode::text::font_names().into_iter().filter(|n| n.to_lowercase().contains(&f)) {
-                println!("{family}");
+            for name in img2gcode::text::font_names().into_iter().filter(|n| n.to_lowercase().contains(&f)) {
+                if img2gcode::stroke_font::is_stroke(&name) {
+                    println!("{name}	(single-line)");
+                } else {
+                    println!("{name}");
+                }
             }
             Ok(())
         }

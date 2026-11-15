@@ -1172,7 +1172,7 @@ checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "img2gcode"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "clap",
  "eframe",
@@ -1180,7 +1180,9 @@ dependencies = [
  "rayon",
  "resvg",
  "rfd",
+ "roxmltree 0.20.0",
  "serde",
+ "svgtypes",
  "thiserror 2.0.21",
  "toml",
 ]
